@@ -1,0 +1,54 @@
+下面是列范数归约部分的向量化例子，包含标量代码和向量代码
+```c
+__global__ void col_norm_reduce_kernel(int rows, int cols, int k, const double *A, double *out_norm)
+{
+    int tid = get_thread_id();
+
+    if (tid == 0) {
+        double nrm = 0.0;
+        for (int i = 0; i < rows; i++) {
+            double val = A[i * cols + k];
+            nrm += val * val;
+        }
+        out_norm[k * cols + k] = sqrt(nrm);
+    }
+}
+#define SIMD_LEN 16
+#define VEC_BYTES 128
+
+__global__ void col_norm_reduce_kernel_vec(int rows, int cols, int k,
+                                           const double *A, double *out_norm)
+{
+    int tid = get_thread_id();
+
+    if (tid == 0) {
+        lvector double nrm_vec = (lvector double)vec_svbcast(0.0);
+
+        int full_blocks = rows / SIMD_LEN;
+        int tail_start  = full_blocks * SIMD_LEN;
+
+        // ----------- 向量部分 -----------
+        for (int i = 0; i < tail_start; i += SIMD_LEN) {
+            lvector double a_vec;
+            vector_load(&A[i * cols + k], &a_vec, VEC_BYTES);
+            lvector double prod_vec = vec_muli(a_vec, a_vec);
+            nrm_vec = vec_mula(prod_vec,
+                               (lvector double)vec_svbcast(1.0),
+                               nrm_vec);
+        }
+
+        // ----------- 尾部标量部分 -----------
+        double tail_sum = 0.0;
+        for (int i = tail_start; i < rows; ++i) {
+            double val = A[i * cols + k];
+            tail_sum += val * val;
+        }
+
+        // ----------- 汇总两个部分 -----------
+        double nrm = sum_f64(nrm_vec) + tail_sum;
+
+        out_norm[k * cols + k] = sqrt(nrm);
+    }
+}
+
+```

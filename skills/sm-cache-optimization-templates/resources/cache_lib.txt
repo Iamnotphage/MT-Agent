@@ -1,0 +1,33 @@
+MT-3000 片上标量缓存（SM Cache）三种策略接口说明。使用前需 #include "common/cache_strategy/cache_wrapper.h"，并确保链接 hthread_device（scalar_load/scalar_store/scalar_malloc/scalar_free）。
+
+一、直接映射缓存 CACHEd（多 set、按地址索引）
+  CACHEd_INIT(__name, __type, __Ea, __sets, __lines)
+    __name: 缓存变量名；__type: 元素类型如 double；__Ea: 初始地址（仅用于类型，可不写）；__sets: set 数量的 log2（如 4 表示 16 路）；__lines: 单 line 字节数的 log2（如 6 表示 64 字节）。
+  CACHEd_RD(__name, __addr, __value)   // 从地址 __addr 读入 __value
+  CACHEd_WT(__name, __addr, __value)   // 将 __value 写入地址 __addr
+  CACHEd_FLUSH(__name)                 // 写回脏块并释放
+  CACHEd_INVALID(__name)               // 不写回，直接释放
+  适用：随机/散列访问，多组 cache line 减少冲突。
+
+二、单缓冲区缓存 CACHEs（单路、按 tag 换入换出）
+  CACHEs_INIT(__name, __type, __Ea, __sets, __lines)
+    __lines: 单 line 字节数的 log2（如 6 表示 64 字节）；__sets 未用，可传 0。
+  CACHEs_RD(__name, __addr, __value)
+  CACHEs_WT(__name, __addr, __value)
+  CACHEs_FLUSH(__name)
+  CACHEs_INVALID(__name)
+  适用：顺序或局部性较好的访问，一块 SM 缓冲反复复用。
+
+三、批量缓存 CACHEb（整块搬入 SM，按指针访问后整块写回）
+  CACHEb_INIT(__name, __type, __Ea, __sets, __lines)
+    __Ea: 要缓存的 DDR 起始地址（指针）；__lines: 要缓存的字节数（会按 8 字节对齐）；__sets 未用，传 0。调用后 __name 指向 SM 内缓冲中的“等效”起始地址，可直接用 __name[i] 或 CACHEb_RD/WT。
+  CACHEb_RD(__name, __addr, __value)   // 从 SM 缓冲内地址读
+  CACHEb_WT(__name, __addr, __value)   // 向 SM 缓冲内地址写
+  CACHEb_FLUSH(__name)                 // 写回 DDR 并释放（必须调用）
+  CACHEb_INVALID(__name)               // 不写回，直接释放
+  适用：连续区间一次性读-改-写，如整行、整块标量循环。
+
+其他
+  scalar_load(void *src, void *buf, size_t bytes);  // DDR -> SM
+  scalar_store(void *buf, void *dst, size_t bytes); // SM -> DDR
+  void *scalar_malloc(size_t bytes); void scalar_free(void *ptr);

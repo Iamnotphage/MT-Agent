@@ -1,0 +1,12 @@
+CACHEs 单缓冲区：按地址 tag 自动换入换出单块 cache line，适合局部性好的标量访问。
+```c
+// 示例：按 tag 访问，同一 line 内多次 RD/WT 只产生一次 DDR 访问
+double *ptr = &global_A[idx];
+double val;
+CACHEs_INIT(my_cache, double, (size_t)ptr, 0, 6);  // 2^6=64 字节 line
+CACHEs_RD(my_cache, ptr, val);
+val += 1.0;
+CACHEs_WT(my_cache, ptr, val);
+CACHEs_FLUSH(my_cache);
+```
+CACHEs_INIT 第 5 个参数为 line 大小的 log2（字节）。

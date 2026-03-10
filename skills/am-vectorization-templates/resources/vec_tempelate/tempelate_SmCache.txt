@@ -1,0 +1,202 @@
+下面是gemm和2d卷积算法核函数缓存优化的例子，包含原版代码和优化后代码
+```c
+__global__ void gemm_kernel(int ni, int nj, int nk, double alpha, double beta, double *a, double *b,
+                            double *c)
+{
+    int thread_id = get_thread_id();
+    int group_size = get_group_size();
+
+    int total_elements = ni * nj;
+    int elements_per_thread = total_elements / group_size;
+    int remainder = total_elements % group_size;
+
+    int start = thread_id * elements_per_thread + (thread_id < remainder ? thread_id : remainder);
+    int end = start + elements_per_thread + (thread_id < remainder ? 1 : 0);
+
+    for (int idx = start; idx < end; ++idx) {
+        c[idx] *= beta;
+    }
+
+    for (int k = 0; k < nk; ++k) {
+        for (int idx = start; idx < end; ++idx) {
+            int i = idx / nj;
+            int j = idx % nj;
+            c[idx] += alpha * a[i * nk + k] * b[k * nj + j];
+        }
+    }
+}
+#define ELEMS_PER_PART 1024
+
+__global__ void gemm_kernel_cache_llm(
+    int ni, int nj, int nk,
+    double alpha, double beta,
+    double *a, double *b, double *c)
+{
+    int gsz = get_group_size();
+    int tid = get_thread_id();
+
+    int total_tasks = ni * nj;
+    const int base = total_tasks / gsz;
+    const int rem  = total_tasks % gsz;
+
+    int start = (tid < rem)
+        ? tid * (base + 1)
+        : rem * (base + 1) + (tid - rem) * base;
+    int end = start + ((tid < rem) ? (base + 1) : base);
+
+    double* cache_a_row = (double*)scalar_malloc(nk * sizeof(double));
+    double* cache_b_row = (double*)scalar_malloc(ELEMS_PER_PART * sizeof(double));
+    double* cache_c     = (double*)scalar_malloc(ELEMS_PER_PART * sizeof(double));
+
+    for (int idx = start; idx < end; )
+    {
+        int i = idx / nj;            // 当前行
+        int j_start = idx % nj;      // 当前起始列
+        int batch_tasks = min(ELEMS_PER_PART, end - idx);
+        batch_tasks = min(batch_tasks, nj - j_start);
+
+        // 1. 缓存 c 当前行块
+        scalar_load(&c[i * nj + j_start], cache_c, batch_tasks * sizeof(double));
+
+        // 2. 先乘 beta
+        for (int bj = 0; bj < batch_tasks; ++bj) {
+            cache_c[bj] *= beta;
+        }
+
+        // 3. 缓存 a 当前行数据
+        scalar_load(&a[i * nk], cache_a_row, nk * sizeof(double));
+
+        // 4. GEMM 计算
+        for (int k = 0; k < nk; ++k) {
+            // 缓存 b[k行][j_start ... j_start+batch_tasks)
+            scalar_load(&b[k * nj + j_start], cache_b_row, batch_tasks * sizeof(double));
+            for (int bj = 0; bj < batch_tasks; ++bj) {
+                cache_c[bj] += alpha * cache_a_row[k] * cache_b_row[bj];
+            }
+        }
+
+        // 5. 写回结果
+        scalar_store(cache_c, &c[i * nj + j_start], batch_tasks * sizeof(double));
+
+        idx += batch_tasks;
+    }
+
+    scalar_free(cache_a_row);
+    scalar_free(cache_b_row);
+    scalar_free(cache_c);
+}
+__global__ void convolution2D_kernel(int ni, int nj, double *A, double *B, uint64_t *before_hot_data, uint64_t *after_hot_data)
+{
+    int group_size = get_group_size();
+    int thread_id  = get_thread_id();
+
+    // 卷积核系数
+    double c11 = +0.2, c21 = +0.5, c31 = -0.8;
+    double c12 = -0.3, c22 = +0.6, c32 = -0.9;
+    double c13 = +0.4, c23 = +0.7, c33 = +0.10;
+
+    const int total_tasks = (ni - 2) * (nj - 2);
+    if (total_tasks <= 0) return;
+
+    const int base_tasks = total_tasks / group_size;
+    const int remainder  = total_tasks % group_size;
+
+    int start = (thread_id < remainder)
+        ? thread_id * (base_tasks + 1)
+        : remainder * (base_tasks + 1) + (thread_id - remainder) * base_tasks;
+    int end = start + ((thread_id < remainder) ? (base_tasks + 1) : base_tasks);
+
+    // 单循环完成全部卷积计算
+    for (int t = start; t < end; ++t)
+    {
+        const int i = 1 + t / (nj - 2); // i ∈ [1, ni-2]
+        const int j = 1 + t % (nj - 2); // j ∈ [1, nj-2]
+
+        double val =
+            c11 * A[(i - 1) * nj + (j - 1)] +
+            c21 * A[(i - 1) * nj + j]       +
+            c31 * A[(i - 1) * nj + (j + 1)] +
+            c12 * A[i * nj + (j - 1)]      +
+            c22 * A[i * nj + j]            +
+            c32 * A[i * nj + (j + 1)]      +
+            c13 * A[(i + 1) * nj + (j - 1)] +
+            c23 * A[(i + 1) * nj + j]       +
+            c33 * A[(i + 1) * nj + (j + 1)];
+
+        B[i * nj + j] = val;
+    }
+}
+#define ELEMS_PER_PART 1024
+
+__global__ void convolution2D_kernel_cache_llm(
+    int ni, int nj, double *A, double *B)
+{
+    int gsz = get_group_size();
+    int tid = get_thread_id();
+
+    // 卷积系数
+    double c11=+0.2, c12=-0.3, c13=+0.4;
+    double c21=+0.5, c22=+0.6, c23=+0.7;
+    double c31=-0.8, c32=-0.9, c33=+0.10;
+
+    if (ni < 3 || nj < 3) return;
+    const int total_tasks = (ni - 2) * (nj - 2);
+    const int base = total_tasks / gsz;
+    const int rem  = total_tasks % gsz;
+
+    int start = (tid < rem)
+        ? tid * (base + 1)
+        : rem * (base + 1) + (tid - rem) * base;
+    int end = start + ((tid < rem) ? (base + 1) : base);
+
+    double* cache_above = (double*)scalar_malloc((ELEMS_PER_PART + 2) * sizeof(double));
+    double* cache_curr  = (double*)scalar_malloc((ELEMS_PER_PART + 2) * sizeof(double));
+    double* cache_below = (double*)scalar_malloc((ELEMS_PER_PART + 2) * sizeof(double));
+    double* cache_out   = (double*)scalar_malloc(ELEMS_PER_PART * sizeof(double));
+
+    for (int t = start; t < end; )
+    {
+        int first_i = 1 + t / (nj - 2);
+        int first_j = 1 + t % (nj - 2);
+        int i = first_i;
+
+        // 当前行剩余可算列数、批量大小
+        int remain_in_row = (nj - 2) - first_j + 1;
+        int batch_tasks = min(ELEMS_PER_PART, min(end - t, remain_in_row));
+
+        // halo
+        int load_start_j = (first_j > 1) ? (first_j - 1) : 0;
+        int load_end_j   = min(first_j + batch_tasks, nj - 1);
+        int load_len = load_end_j - load_start_j + 1;
+
+        // 批量加载三行数据
+        scalar_load(&A[(i-1)*nj + load_start_j], cache_above, load_len * sizeof(double));
+        scalar_load(&A[i*nj     + load_start_j], cache_curr,  load_len * sizeof(double));
+        scalar_load(&A[(i+1)*nj + load_start_j], cache_below, load_len * sizeof(double));
+
+        // 卷积计算
+        for (int bi = 0; bi < batch_tasks; ++bi) {
+            int j = first_j + bi;
+            int off_m1 = (j - 1) - load_start_j;
+            int off_0  = j - load_start_j;
+            int off_p1 = (j + 1) - load_start_j;
+            double res =
+                c11*cache_above[off_m1] + c21*cache_above[off_0] + c31*cache_above[off_p1] +
+                c12*cache_curr [off_m1] + c22*cache_curr [off_0] + c32*cache_curr [off_p1] +
+                c13*cache_below[off_m1] + c23*cache_below[off_0] + c33*cache_below[off_p1];
+            cache_out[bi] = res;
+        }
+
+        // 批量写回当前行的 batch_tasks 个结果
+        scalar_store(cache_out, &B[i * nj + first_j], batch_tasks * sizeof(double));
+
+        t += batch_tasks;
+        // 若这一批正好扫完整行，则自动进入下一行
+    }
+
+    scalar_free(cache_above);
+    scalar_free(cache_curr);
+    scalar_free(cache_below);
+    scalar_free(cache_out);
+}
+```

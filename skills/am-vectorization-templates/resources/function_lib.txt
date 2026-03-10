@@ -1,0 +1,27 @@
+```c
+// 数学运算
+lvector double vec_mulb(lvector double a, lvector double b ,lvector double c);  // a * b - c
+lvector double vec_mula(lvector double a, lvector double b ,lvector double c);  // a * b + c
+lvector double vec_muli(lvector double a, lvector double b);  // a * b
+lvector double vec_svbcast(1.0); // 广播向量操作，这里以1.0为例
+lvector double vec_mulb(lvector double a,(lvector double)vec_svbcast(1.0) ,lvector double b);  //a - b，使用mulb替代实现
+lvector double vec_mula(lvector double a,(lvector double)vec_svbcast(1.0) ,lvector double b);  //a + b，使用mula替代实现
+lvector double vm_fdivd16(lvector double a, lvector double b);  // a / b
+lvector double vm_frecd16(lvector double a);  // 1 / a 
+lvector double vm_sqrtd16(lvector double a);  // sqrt(a)
+lvector double vm_powd16_u10(lvector double x，lvector double y); // pow(x,y)
+lvector double vm_fmaxd16(lvector double a， lvector double b); // 向量a和b中的对应各浮点数的最大值,vm_fmind16求最小值
+lvector double vm_sind16_u10(lvector double a);// sin(a)
+
+// 内存操作，向量变量和缓存均可参与计算
+int vector_load(void *mem, void *buf, unsigned int bytes);     // 全局内存->缓存或者向量变量
+int vector_store(void *buf, void *mem, int bytes);             // 缓存或者向量变量->全局内存  
+lvector double vec_ld(0, lvector double *buf);                 // 缓存->向量变量
+vec_st(lvector double reg, 0, lvector double *buf);            // 向量变量->缓存
+
+// 内存管理
+void* vector_malloc(unsigned int bytes);                       // 分配向量缓存
+int vector_free(void *ptr);                                    // 释放向量缓存
+
+//向量变量lvector double支持单个元素随机访问。取出第一个元素的示例：mov_to_svr_v16df(lvector double op);tmp1 = mov_from_svr0_df();
+```

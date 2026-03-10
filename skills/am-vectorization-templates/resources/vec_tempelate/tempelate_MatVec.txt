@@ -1,0 +1,108 @@
+下面是矩阵向量乘类的算法向量化的例子，包含标量代码和向量代码
+```c
+__global__ void matvec_kernel(int nx, int ny, double *A, double *x, double *y) {
+    int tid = get_thread_id();
+    int gsize = get_group_size();
+
+    int per_thread = nx / gsize;
+    int remainder  = nx % gsize;
+
+    int start = tid * per_thread;
+    int end   = (tid + 1) * per_thread;
+    if (tid < remainder) {
+        start += tid;
+        end = start + per_thread + 1;
+    } else {
+        start += remainder;
+        end = start + per_thread;
+    }
+    start = min(start, nx);
+    end   = min(end, nx);
+
+    for (int i = start; i < end; i++) {
+        double sum = 0.0;
+        int row_off = i * ny;
+        for (int j = 0; j < ny; j++) {
+            sum += A[row_off + j] * x[j];
+        }
+        y[i] = sum;
+    }
+}
+
+/* 一条向量 16 个 double -------------------------------------------------- */
+#define SIMD_LEN  16
+#define VEC_BYTES 128
+
+__global__ void matvec_kernel_vec(int nx, int ny,
+                              double *A,     /* A[nx][ny] */
+                              double *x,     /* x[ny]     */
+                              double *y,     /* y[nx]     */
+                              uint64_t *before_hot_data,
+                              uint64_t *after_hot_data)
+{
+    int thread_id  = get_thread_id();
+    int group_size = get_group_size();
+
+    // 任务划分：每线程处理若干行
+    int total_elements     = nx;                                
+    int elements_per_thread = total_elements / group_size;     
+    int remainder           = total_elements % group_size;     
+
+    int start_idx = thread_id * elements_per_thread;   
+    int end_idx   = (thread_id + 1) * elements_per_thread;
+
+    if (thread_id < remainder) {  
+        start_idx += thread_id;  
+        end_idx    = start_idx + elements_per_thread + 1;  
+    } else {  
+        start_idx += remainder;  
+        end_idx    = start_idx + elements_per_thread;  
+    }
+
+    start_idx = min(start_idx, total_elements);  
+    end_idx   = min(end_idx, total_elements);  
+
+    // 常量向量
+    lvector double vzero = (lvector double)vec_svbcast(0.0);
+    lvector double vone  = (lvector double)vec_svbcast(1.0);
+
+    // 行处理
+    for (int i = start_idx; i < end_idx; i++) {
+        int row_offset = i * ny;
+        y[i] = 0.0;
+
+        // 向量迭代次数
+        int vec_iterations = ny / SIMD_LEN;
+
+        // 向量累加器
+        lvector double sum_vec = vzero;
+
+        // 向量化内层循环
+        for (int v = 0; v < vec_iterations; ++v) {
+            int col_offset = v * SIMD_LEN;
+            if (col_offset + SIMD_LEN <= ny) {
+                lvector double a_vec, x_vec;
+
+                vector_load(&A[row_offset + col_offset], &a_vec, VEC_BYTES);
+                vector_load(&x[col_offset], &x_vec, VEC_BYTES);
+
+                lvector double prod_vec = vec_muli(a_vec, x_vec);
+                sum_vec = vec_mula(prod_vec, vone, sum_vec);
+            }
+        }
+
+        // 求和
+        double local_sum = 0.0;
+        if (vec_iterations > 0) {
+            local_sum += sum_f64(sum_vec);
+        }
+
+        // 尾部标量部分
+        for (int j = vec_iterations * SIMD_LEN; j < ny; ++j) {
+            local_sum += A[row_offset + j] * x[j];
+        }
+
+        y[i] = local_sum;
+    }
+}
+```

@@ -1,0 +1,204 @@
+下面是GEMM算法向量化的例子，包含标量代码和向量代码
+```c
+__global__ void gemm_kernel(int ni, int nj, int nk, double alpha, double beta, double *a, double *b,
+                            double *c)
+{
+    int thread_id = get_thread_id();
+    int group_size = get_group_size();
+
+    int total_elements = ni * nj;
+    int elements_per_thread = total_elements / group_size;
+    int remainder = total_elements % group_size;
+
+    int start = thread_id * elements_per_thread + (thread_id < remainder ? thread_id : remainder);
+    int end = start + elements_per_thread + (thread_id < remainder ? 1 : 0);
+
+    for (int idx = start; idx < end; ++idx) {
+        c[idx] *= beta;
+    }
+
+    for (int k = 0; k < nk; ++k) {
+        for (int idx = start; idx < end; ++idx) {
+            int i = idx / nj;
+            int j = idx % nj;
+            c[idx] += alpha * a[i * nk + k] * b[k * nj + j];
+        }
+    }
+}
+#define SIMD_LEN 16
+#define VEC_BYTES 128
+
+/*------------------------------------------------------------------*/
+/* gemm_kernel_vec: Compute c[idx] = beta * c[idx] + alpha * Σ_k (a[i * nk + k] * b[k * nj + j]) */
+/* Vectorized version of gemm_kernel */
+/*------------------------------------------------------------------*/
+__global__ void gemm_kernel_vec(int ni, int nj, int nk, double alpha, double beta, double *a, double *b, double *c)
+{
+    int thread_id = get_thread_id();
+    int group_size = get_group_size();
+
+    /* Thread task division */
+    int total_elements = ni * nj;
+    int elements_per_thread = total_elements / group_size;
+    int remainder = total_elements % group_size;
+    int start = thread_id * elements_per_thread + (thread_id < remainder ? thread_id : remainder);
+    int end = start + elements_per_thread + (thread_id < remainder ? 1 : 0);
+
+    /* Scale c[idx] *= beta */
+    for (int idx = start; idx < end; idx += SIMD_LEN) {
+        int vec_end = min(idx + SIMD_LEN, end);
+
+        if (idx + SIMD_LEN <= end && (idx % nj) + SIMD_LEN <= nj) { /* Full vector, within row */
+            lvector double c_vec;
+            vector_load(&c[idx], &c_vec, VEC_BYTES);
+
+            /* c_vec *= beta */
+            lvector double beta_vec = (lvector double)vec_svbcast(beta);
+            c_vec = vec_muli(c_vec, beta_vec);
+            vector_store(&c_vec, &c[idx], VEC_BYTES);
+        } else { /* Remainder or crosses row boundary */
+            for (int ii = idx; ii < vec_end; ++ii) {
+                c[ii] *= beta;
+            }
+        }
+    }
+
+    /* Update c[idx] += alpha * a[i * nk + k] * b[k * nj + j] */
+    for (int k = 0; k < nk; ++k) {
+        for (int idx = start; idx < end; idx += SIMD_LEN) {
+            int vec_end = min(idx + SIMD_LEN, end);
+
+            if (idx + SIMD_LEN <= end && (idx % nj) + SIMD_LEN <= nj) { /* Full vector, within row */
+                int i = idx / nj;
+                int j = idx % nj;
+
+                lvector double c_vec, b_vec;
+                vector_load(&c[idx], &c_vec, VEC_BYTES);
+                vector_load(&b[k * nj + j], &b_vec, VEC_BYTES);
+
+                /* Broadcast a[i * nk + k] * alpha */
+                lvector double a_alpha_vec = (lvector double)vec_svbcast(alpha * a[i * nk + k]);
+
+                /* c_vec += a_alpha_vec * b_vec */
+                lvector double prod_vec = vec_muli(a_alpha_vec, b_vec);
+                c_vec = vec_mula(prod_vec, (lvector double)vec_svbcast(1.0), c_vec);
+                vector_store(&c_vec, &c[idx], VEC_BYTES);
+            } else { /* Remainder or crosses row boundary */
+                for (int ii = idx; ii < vec_end; ++ii) {
+                    int i = ii / nj;
+                    int j = ii % nj;
+                    c[ii] += alpha * a[i * nk + k] * b[k * nj + j];
+                }
+            }
+        }
+    }
+}
+```
+下面是Symmetric Gram Matrix算法向量化的例子，包含标量代码和向量代码
+```c
+/* =====================================================
+ * Symmetric Gram Matrix - Scalar version
+ * G = X^T * X
+ * Only upper triangle is computed, then mirrored
+ * ===================================================== */
+__global__ void symm_gram_kernel(int m, int n,
+                                 const double *data, /* [n,m] */
+                                 double *gram)       /* [m,m] */
+{
+    int tid = get_thread_id();
+    int gsize = get_group_size();
+
+    /* 按 j1 均分给各线程 */
+    int per_thread = (m + gsize - 1) / gsize;
+    int j1_start = tid * per_thread;
+    int j1_end   = min(j1_start + per_thread, m);
+
+    for (int j1 = j1_start; j1 < j1_end; ++j1) {
+        for (int j2 = j1; j2 < m; ++j2) {
+            double acc = 0.0;
+            for (int i = 0; i < n; ++i) {
+                acc += data[i*m + j1] * data[i*m + j2];
+            }
+            gram[j1*m + j2] = acc;
+            gram[j2*m + j1] = acc; /* 对称 */
+        }
+    }
+}
+#define SIMD_LEN 16
+#define VEC_BYTES 128
+/* =====================================================
+ * Symmetric Gram Matrix - Vectorized version
+ * ===================================================== */
+__global__ void symm_gram_kernel_vec(int m, int n,
+                              const double *data,
+                              double *gram)
+{
+    int tid     = get_thread_id();
+    int gsize   = get_group_size();
+    int tid_mod = tid % 24;
+
+    int per_thread = (m + gsize - 1) / gsize;
+    int j1_start   = tid * per_thread;
+    int j1_end     = min(j1_start + per_thread, m);
+
+    for (int j1 = j1_start; j1 < j1_end; ++j1)
+    {
+        for (int j2 = j1; j2 < m; j2 += SIMD_LEN)
+        {
+            int vec_end = min(j2 + SIMD_LEN, m);
+
+            if (j2 + SIMD_LEN <= m) {     /* ===== 整块 ===== */
+                lvector double sum_vec = (lvector double)vec_svbcast(0.0);
+
+                for (int i = 0; i < n; ++i) {
+                    double a_scalar = data[i*m + j1];
+                    lvector double a_vec = (lvector double)vec_svbcast(a_scalar);
+                    lvector double b_vec;
+                    /* (void*) 避免 const 报警 */
+                    vector_load((void*)&data[i*m + j2], &b_vec, VEC_BYTES);
+                    lvector double prod = vec_muli(a_vec, b_vec);
+                    sum_vec = vec_mula(prod,
+                                       (lvector double)vec_svbcast(1.0),
+                                       sum_vec);
+                }
+
+                vector_store(&sum_vec, &gram[j1*m + j2], VEC_BYTES);
+
+                /* 写下三角 */
+                mov_to_svr_v16df(sum_vec);
+                for (int k = 0; k < SIMD_LEN; ++k) {
+                    double val;
+                    switch (k) {
+                        case 0:  val = mov_from_svr0_df();  break;
+                        case 1:  val = mov_from_svr1_df();  break;
+                        case 2:  val = mov_from_svr2_df();  break;
+                        case 3:  val = mov_from_svr3_df();  break;
+                        case 4:  val = mov_from_svr4_df();  break;
+                        case 5:  val = mov_from_svr5_df();  break;
+                        case 6:  val = mov_from_svr6_df();  break;
+                        case 7:  val = mov_from_svr7_df();  break;
+                        case 8:  val = mov_from_svr8_df();  break;
+                        case 9:  val = mov_from_svr9_df();  break;
+                        case 10: val = mov_from_svr10_df(); break;
+                        case 11: val = mov_from_svr11_df(); break;
+                        case 12: val = mov_from_svr12_df(); break;
+                        case 13: val = mov_from_svr13_df(); break;
+                        case 14: val = mov_from_svr14_df(); break;
+                        case 15: val = mov_from_svr15_df(); break;
+                    }
+                    gram[(j2 + k)*m + j1] = val;
+                }
+            }
+            else {                        /* ===== 尾块 ===== */
+                for (int jj = j2; jj < vec_end; ++jj) {
+                    double acc = 0.0;
+                    for (int i = 0; i < n; ++i)
+                        acc += data[i*m + j1] * data[i*m + jj];
+                    gram[j1*m + jj] = acc;
+                    gram[jj*m + j1] = acc;
+                }
+            }
+        }
+    }
+}
+```

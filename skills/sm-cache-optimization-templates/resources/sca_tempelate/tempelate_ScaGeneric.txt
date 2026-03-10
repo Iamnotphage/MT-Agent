@@ -1,0 +1,54 @@
+标量 SM 缓存优化通用模板：对纯标量循环使用三种策略之一（CACHEd/CACHEs/CACHEb），将 DDR 访问改为 SM 缓冲，减少访存延迟。
+```c
+// 原始标量核函数示例：y[i] = alpha * x[i] + y[i]（DAXPY）
+__global__ void daxpy_kernel(int n, double alpha, double *x, double *y)
+{
+    int tid = get_thread_id();
+    int gsz = get_group_size();
+    int per = (n + gsz - 1) / gsz;
+    int start = tid * per;
+    int end = (start + per < n) ? start + per : n;
+
+    for (int i = start; i < end; i++)
+        y[i] = alpha * x[i] + y[i];
+}
+
+// 使用 CACHEb（批量）优化：整块搬入 SM，计算后整块写回
+#define SCA_BLOCK 1024
+__global__ void daxpy_kernel_sca_qwen(int n, double alpha, double *x, double *y)
+{
+    int tid = get_thread_id();
+    int gsz = get_group_size();
+    int total = n;
+    int per = (total + gsz - 1) / gsz;
+    int start = tid * per;
+    int end = (start + per < total) ? start + per : total;
+
+    int i = start;
+    while (i < end) {
+        int len = (end - i) < SCA_BLOCK ? (end - i) : SCA_BLOCK;
+        size_t bytes = (size_t)len * sizeof(double);
+
+        double *y_ptr = &y[i];
+        double *x_ptr = &x[i];
+        double *y_cache = NULL;
+        double *x_cache = NULL;
+
+        CACHEb_INIT(y_cache, double, (size_t)y_ptr, 0, bytes);
+        CACHEb_INIT(x_cache, double, (size_t)x_ptr, 0, bytes);
+
+        for (int j = 0; j < len; j++) {
+            double xv, yv;
+            CACHEb_RD(x_cache, &x_cache[j], xv);
+            CACHEb_RD(y_cache, &y_cache[j], yv);
+            yv = alpha * xv + yv;
+            CACHEb_WT(y_cache, &y_cache[j], yv);
+        }
+
+        CACHEb_FLUSH(y_cache);
+        CACHEb_INVALID(x_cache);
+        i += len;
+    }
+}
+```
+规范：1）先做任务划分（start/end）；2）按块循环，每块用 CACHEb_INIT 搬入 x/y 的连续段；3）在 SM 上用 CACHEb_RD/WT 计算；4）写回用 CACHEb_FLUSH，只读用 CACHEb_INVALID；5）函数名后缀 _sca_qwen。

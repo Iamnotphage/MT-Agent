@@ -1,0 +1,164 @@
+通用向量化模板，包含最基础的接口调用
+```c
+/*---------------- 标量实现 ----------------*/
+__global__ void generic_kernel(int ni, int nj,double coeff, double *A, double *B)
+{
+    int tid = get_thread_id();
+    int num_threads = get_group_size();
+    int per_thread = (ni + num_threads - 1) / num_threads;
+    int start_i = tid * per_thread;
+    int end_i   = min(start_i + per_thread, ni);
+
+    for (int i = start_i; i < end_i; ++i) {
+        for (int j = 0; j < nj; ++j) {
+            double a = A[i * nj + j];
+            double b = B[i * nj + j];
+
+            /* 基本运算 */
+            double mul  = a * b;                      // 乘法
+            double add  = a + b;                      // 加法
+            double sub  = a - b;                      // 减法
+            double div  = a / (b + 1e-6);              // 除法 (避免除0)
+
+            double mula = a*b + coeff;                 // 乘加
+            double mulb = a*b - coeff;                 // 乘减
+
+            double rec  = 1.0 / (a + 1e-6);            // 倒数
+            double sqr  = sqrt(fabs(a));               // 开方
+            double pw   = pow(fabs(a)+1e-3, 2.0);      // 幂次
+
+            double vmax = a > b ? a : b;               // 最大值
+            double vmin = a < b ? a : b;               // 最小值
+
+            double vsin = sin(a);                      // 正弦
+
+            /* 核心组合公式 */
+            double res = mula + rec + vmax;
+            B[i * nj + j] = res;
+        }
+
+        for (int j = 0; j < nj; j += 16) {
+            double sum_val = 0.0;
+            for (int jj = j; jj < min(j+16, nj); ++jj) sum_val += B[i*nj + jj];
+            for (int jj = j; jj < min(j+16, nj); ++jj) B[i*nj + jj] += sum_val;
+        }
+    }
+}
+
+#define SIMD_LEN    16
+#define VEC_BYTES   128
+
+/*---------------- 向量实现 ----------------*/
+__global__ void generic_kernel_vec(int ni, int nj, double coeff, double *A, double *B)
+{
+    int thread_id = get_thread_id();
+    int num_threads = get_group_size();
+
+    /* 分配向量缓冲区 */
+    lvector double *buf_a   = (lvector double *)vector_malloc(VEC_BYTES);
+    lvector double *buf_b   = (lvector double *)vector_malloc(VEC_BYTES);
+    lvector double *buf_res = (lvector double *)vector_malloc(VEC_BYTES);
+    if (!buf_a || !buf_b || !buf_res) {
+        if (buf_a) vector_free(buf_a);
+        if (buf_b) vector_free(buf_b);
+        if (buf_res) vector_free(buf_res);
+        return;
+    }
+
+    /* 任务分配 */
+    int per_thread = (ni + num_threads - 1) / num_threads;
+    int start_i = thread_id * per_thread;
+    int end_i   = min(start_i + per_thread, ni);
+
+    /* 常量广播 */
+    lvector double coeff_vec = (lvector double)vec_svbcast(coeff);
+    lvector double one_vec   = (lvector double)vec_svbcast(1.0);
+    lvector double eps_vec   = (lvector double)vec_svbcast(1e-6);
+
+    for (int i = start_i; i < end_i; ++i) {
+        for (int j = 0; j < nj; j += SIMD_LEN) {
+            int vec_end_j = min(j + SIMD_LEN, nj);
+
+            if (j + SIMD_LEN <= nj) {
+                /* 加载向量数据 */
+                vector_load(&A[i*nj + j], buf_a, VEC_BYTES);
+                vector_load(&B[i*nj + j], buf_b, VEC_BYTES);
+
+                lvector double va = vec_ld(0, buf_a);
+                lvector double vb = vec_ld(0, buf_b);
+
+                /* 基本运算 */
+                /* 乘法 va*vb */
+                lvector double vmul  = vec_muli(va, vb);
+                /* 加法 va+vb */
+                lvector double vadd  = vec_mula(va, one_vec, vb);  // a*1 + b
+                /* 减法 va-vb */
+                lvector double vsub  = vec_mulb(va, one_vec, vb);  // a*1 - b
+                /* 除法 va/(vb+eps) */
+                lvector double vdiv  = vm_fdivd16(va, vec_mula(vb, one_vec, eps_vec));
+                /* 乘加 va*vb + coeff */
+                lvector double vmula = vec_mula(va, vb, coeff_vec);
+                /* 乘减 va*vb - coeff */
+                lvector double vmulb = vec_mulb(va, vb, coeff_vec);
+                /* 倒数 1/va */
+                lvector double vrec  = vm_frecd16(vec_mula(va, one_vec, eps_vec));
+                /* 开方 sqrt(va) */
+                lvector double vsqr  = vm_sqrtd16(va);
+                /* 幂次 pow(va, 2.0) */
+                lvector double vpw   = vm_powd16_u10(vec_mula(va, one_vec, eps_vec),(lvector double)vec_svbcast(2.0));
+                /* 最大值 */
+                lvector double vmax  = vm_fmaxd16(va, vb);
+                /* 最小值 */
+                lvector double vmin  = vm_fmind16(va, vb);
+                /* 正弦 */
+                lvector double vsin  = vm_sind16_u10(va);
+
+                /* 组合公式: vmula+vrec+vmax */
+                lvector double vres = vec_mula(vmula, one_vec, vrec);
+                vres = vec_mula(vres, one_vec, vmax);
+
+                /* 写入缓冲区（用于存回内存和求和） */
+                // vec_st(vres, 0, buf_res);
+
+                /**
+                 求和方法:使用自己编写的sum_f64接口函数，这里默认已经实现
+                 double sum_f64(lvector double op) {
+                    double ret = 0.0, tmp1;
+                    mov_to_svr_v16df(op);
+                    tmp1 = mov_from_svr0_df(); ret = ret + tmp1;
+                    tmp1 = mov_from_svr1_df(); ret = ret + tmp1;
+                    tmp1 = mov_from_svr2_df(); ret = ret + tmp1;
+                    // 省略中间重复过程
+                    tmp1 = mov_from_svr14_df(); ret = ret + tmp1;
+                    tmp1 = mov_from_svr15_df(); ret = ret + tmp1;
+                    return ret;
+                }
+                 */
+                double sum_val = sum_f64(vres);
+
+                /* 把向量求和结果加到每个元素上再写回 */
+                lvector double sum_vec = (lvector double)vec_svbcast(sum_val);
+                lvector double vfinal   = vec_mula(vres, one_vec, sum_vec);
+
+                /* 写回全局内存 */
+                vec_st(vfinal, 0, buf_res);
+                vector_store(buf_res, &B[i*nj + j], VEC_BYTES);
+
+            } else {
+                /* 尾部标量 */
+                for (int jj = j; jj < vec_end_j; ++jj) {
+                    double a = A[i*nj + jj];
+                    double b = B[i*nj + jj];
+                    double res = (a*b + coeff) + 1.0/(a+1e-6) + (a>b?a:b);
+                    /* 这里也加上整个向量的和（模拟效果） */
+                    B[i*nj + jj] = res; 
+                }
+            }
+        }
+    }
+
+    vector_free(buf_a);
+    vector_free(buf_b);
+    vector_free(buf_res);
+}
+```

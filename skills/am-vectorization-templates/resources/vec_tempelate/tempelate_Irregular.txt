@@ -1,0 +1,18 @@
+下面是不适合向量化的例子，不规则访存或强数据依赖，难以向量化。这种情况不进行向量化，直接返回源代码，改一下函数名称即可。
+```c
+__global__ void adi_kernel1(int n, double *A, double *B, double *X)
+{
+    int thread_id = get_thread_id();
+    int total_threads = get_group_size();
+    int rows_per_thread = n / total_threads;
+    int extra_rows = n % total_threads;
+    int start_row = thread_id * rows_per_thread + (thread_id < extra_rows ? thread_id : extra_rows);
+    int end_row = start_row + rows_per_thread + (thread_id < extra_rows ? 1 : 0);
+    for (int i1 = start_row; i1 < end_row; i1++) {
+        for (int i2 = 1; i2 < n; i2++) {
+            X[i1 * n + i2] = X[i1 * n + i2] - X[i1 * n + (i2 - 1)] * A[i1 * n + i2] / B[i1 * n + (i2 - 1)];
+            B[i1 * n + i2] = B[i1 * n + i2] - A[i1 * n + i2] * A[i1 * n + i2] / B[i1 * n + (i2 - 1)];
+        }
+    }
+}
+```

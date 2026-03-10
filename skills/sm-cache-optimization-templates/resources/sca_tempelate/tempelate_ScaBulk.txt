@@ -1,0 +1,17 @@
+CACHEb 批量缓存：整块 DDR 搬入 SM，在 SM 内按指针读写，最后整块写回。适合连续区间、读-改-写模式。
+```c
+// 示例：对数组 A 的连续段做标量运算后写回
+int len = 256;
+size_t bytes = (size_t)len * sizeof(double);
+double *A = &global_A[offset];
+double *A_cache = NULL;
+CACHEb_INIT(A_cache, double, (size_t)A, 0, bytes);
+for (int i = 0; i < len; i++) {
+    double v;
+    CACHEb_RD(A_cache, &A_cache[i], v);
+    v = v * 2.0 + 1.0;
+    CACHEb_WT(A_cache, &A_cache[i], v);
+}
+CACHEb_FLUSH(A_cache);
+```
+注意：CACHEb_INIT 后原指针变量被重定向到 SM 缓冲，只能通过 CACHEb_RD/WT 或直接 A_cache[i] 访问；写回前必须 CACHEb_FLUSH。

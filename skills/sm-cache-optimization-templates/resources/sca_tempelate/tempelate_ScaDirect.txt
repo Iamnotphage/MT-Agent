@@ -1,0 +1,11 @@
+CACHEd 直接映射：多 set、按地址索引，适合随机或散列访问，减少冲突。
+```c
+double *ptr = &global_A[idx];
+double val;
+CACHEd_INIT(my_cache, double, (size_t)ptr, 4, 6);  // 16 set, 64B line
+CACHEd_RD(my_cache, ptr, val);
+val *= 2.0;
+CACHEd_WT(my_cache, ptr, val);
+CACHEd_FLUSH(my_cache);
+```
+CACHEd_INIT：第 4 个参数 sets 的 log2，第 5 个参数 line 字节数的 log2。

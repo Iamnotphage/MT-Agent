@@ -1,0 +1,10 @@
+__pycache__
+.vscode/
+output/code/kernel_generated.h
+output/reports/*
+.devkit
+
+# 配置文件
+config.json
+
+
