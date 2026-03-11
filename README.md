@@ -15,25 +15,27 @@
 1. 创建环境：
 
 ```bash
-/thfs3/home/xjtu_cx/miniconda3/bin/conda env create -f environment.yml
+conda env create -f environment.yml
 ```
 
 2. 激活环境：
 
 ```bash
-source /thfs3/home/xjtu_cx/miniconda3/bin/activate mt-autooptimize
+conda activate mt-autooptimize
 ```
 
 3. 准备配置文件：
+
+手动添加`config.json`或者:
 
 ```bash
 cp config.example.json config.json
 ```
 
-配置中包含两组 LLM：
+配置中主要包含两组 LLM：
 
-- `analyze_llm`：用于源码分析
-- `code_llm`：用于优化代码生成
+- `analyze_llm`：用于源码分析的LLM的API KEY
+- `code_llm`：用于优化代码生成的API KEY
 
 ## 项目结构
 
@@ -42,7 +44,7 @@ MT-AutoOptimize/
 ├── main.py                     # 项目主入口
 ├── config.example.json         # 配置模板
 ├── environment.yml             # conda 环境
-├── input/                      # 输入目录（如 test.dev.c / compile-entry.dev.c）
+├── input/                      # 输入目录（如 test.dev.c）
 ├── output/
 │   ├── code/                   # 优化后代码输出（kernel_generated.h）
 │   └── reports/                # 编译测试与流程报告
