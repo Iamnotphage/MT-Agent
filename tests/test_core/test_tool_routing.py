@@ -3,7 +3,7 @@ from core.nodes.tool_routing import (
     create_tool_routing_node,
     needs_approval,
 )
-from tools.registry import DEFAULT_TOOL_RISK
+from tools.policy import DEFAULT_TOOL_RISK
 
 
 def _make_tc(tool_name: str, call_id: str = "call_1") -> dict:

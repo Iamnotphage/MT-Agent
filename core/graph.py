@@ -13,6 +13,7 @@ def build_agent_graph(
     event_bus: EventBus,
     tool_schemas: list[dict] | None = None,
     executor = None,
+    checkpointer = None,
 ) -> StateGraph:
     """
     工厂模式创建结点，构建 ReAct 循环的 LangGraph 状态图
@@ -22,9 +23,10 @@ def build_agent_graph(
         event_bus: 事件总线, 用于向 CLI 层推送流式事件
         tool_schemas: OpenAI function-calling 格式的工具定义列表
         executor: 工具执行器 (tool_name, arguments) -> result_str
+        checkpointer: LangGraph 检查点存储, 用于 interrupt/resume 和多轮对话
 
     Returns:
-        StateGraph: 状态图
+        编译后的 StateGraph runnable
     """
 
     # P0 fallback: executor 未提供时使用占位函数
@@ -89,4 +91,4 @@ def build_agent_graph(
         }
     )
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)

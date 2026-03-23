@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from core.event_bus import AgentEvent, EventBus, EventType
 from core.state import AgentState, ToolCallInfo
-from tools.registry import DEFAULT_TOOL_RISK, DEFAULT_UNKNOWN_RISK
+from tools.policy import DEFAULT_TOOL_RISK, DEFAULT_UNKNOWN_RISK
 
 logger = logging.getLogger(__name__)
 
