@@ -1,6 +1,29 @@
 # MT-AutoOptimize
 
+![banner](docs/banner.png)
+
+---
+
+Coding Agent for MT-3000
+
 ## 项目介绍
+
+主要用LangGraph构建ReAct循环，实现Agent
+
+## 运行方法
+
+先安装好`uv`
+
+```bash
+# version 0.1.0
+git checkout dev-yc
+uv sync
+uv run python -m cli.app
+```
+
+---
+
+## 项目介绍(deprecated)
 
 `MT-AutoOptimize` 是一个面向 MT-3000 平台的自动代码优化工具，参考 `mt-vectorizer-tool` 重构而来。  
 工具提供两类优化能力：
@@ -10,7 +33,7 @@
 
 整体流程为：**分析源码 -> 生成优化代码 -> 编译测试 -> 输出结果**。
 
-## 环境搭建与激活
+## 环境搭建与激活(deprecated)
 
 1. 创建环境：
 
@@ -37,7 +60,7 @@ cp config.example.json config.json
 - `analyze_llm`：用于源码分析的LLM的API KEY
 - `code_llm`：用于优化代码生成的API KEY
 
-## 项目结构
+## 项目结构(deprecated)
 
 ```text
 MT-AutoOptimize/
@@ -60,7 +83,7 @@ MT-AutoOptimize/
 └── skills/                     # Skill 与资源
 ```
 
-## 使用方法
+## 使用方法(deprecated)
 
 ### 1) 一键主流程（推荐）
 
@@ -87,7 +110,7 @@ python3 scripts/compile_test.py -i output/code/compile-entry.dev.c
 
 - `output/reports/compile_test_YYYYMMDD_HHMMSS.log`
 
-## 输出说明
+## 输出说明(deprecated)
 
 - 优化代码输出到：`output/code/kernel_generated.h`
 - 报告输出到：`output/reports/`
