@@ -5,7 +5,7 @@ DEFAULT_TOOL_RISK: dict[str, str] = {
     "read_file":           "low",
     "ls":                  "low",
     "glob":                "low",
-    "grep_search":         "low",
+    "grep":                "low",
     "write_file":          "medium",
     "edit_file":           "medium",
     # Shell

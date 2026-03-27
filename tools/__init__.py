@@ -4,10 +4,13 @@ from tools.file_ops.read_file import ReadFileTool
 from tools.file_ops.write_file import WriteFileTool
 from tools.file_ops.ls import LsTool
 from tools.file_ops.glob import GlobTool
+from tools.file_ops.grep import GrepTool
 
 __all__ = [
+    # Base
     "BaseTool", "ToolResult", "ToolRiskLevel", "ToolRegistry",
-    "ReadFileTool", "WriteFileTool", "LsTool", "GlobTool",
+    # File System
+    "ReadFileTool", "WriteFileTool", "LsTool", "GlobTool", "GrepTool",
     "create_default_tools",
 ]
 
@@ -19,4 +22,5 @@ def create_default_tools(*, workspace: str) -> list[BaseTool]:
         WriteFileTool(workspace=workspace),
         LsTool(workspace=workspace),
         GlobTool(workspace=workspace),
+        GrepTool(workspace=workspace),
     ]
