@@ -8,15 +8,25 @@ from __future__ import annotations
 
 import sys
 import uuid
+import unicodedata
 from typing import TYPE_CHECKING, Any
 
 from langgraph.types import Command
 from rich.console import Console
 from rich.text import Text
-import unicodedata
-from prompt_toolkit import prompt as pt_prompt
-from prompt_toolkit.formatted_text import ANSI
+
+from prompt_toolkit import Application
+from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.cursor_shapes import CursorShape
+from prompt_toolkit.document import Document
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+from prompt_toolkit.key_binding.bindings.emacs import load_emacs_bindings
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 
 from core.event_bus import AgentEvent, EventType
 
@@ -28,6 +38,14 @@ PROMPT_SYMBOL = "❯"
 _RISK_STYLE = {"low": "green", "medium": "yellow", "high": "red bold"}
 _TOOL_DISPLAY = {"write_file": "Write", "read_file": "Read", "ls": "Ls"}
 _BG_USER = "on #252530"
+
+_COMMANDS = [
+    ("/clear",   "清屏"),
+    ("/new",     "开启新会话 (清空对话历史)"),
+    ("/help",    "显示帮助信息"),
+    ("/version", "显示版本号"),
+    ("/exit",    "退出"),
+]
 
 
 class Repl:
@@ -41,6 +59,7 @@ class Repl:
 
         self._streaming = False
         self._last_tool_had_diff = False
+        self._history = InMemoryHistory()
 
         self._bind_events()
 
@@ -228,11 +247,6 @@ class Repl:
 
     # ── REPL 命令 ────────────────────────────────────────────────
 
-
-    def _prompt(self) -> str:
-        # ANSI 紫色 ❯，prompt_toolkit 会正确计算其宽度
-        return f"\x1b[38;2;132;122;206m{PROMPT_SYMBOL}\x1b[0m "
-
     def _handle_command(self, cmd: str) -> bool:
         """处理 /command。返回 True 继续循环，False 退出。"""
         match cmd:
@@ -279,6 +293,7 @@ class Repl:
     # ── 渲染 ─────────────────────────────────────────────────────
 
     def _render_user_input(self, user_input: str) -> None:
+        """用灰色背景重新渲染用户输入行，与 LLM 输出区分"""
         sys.stdout.write("\x1b[A\x1b[2K\r")
         sys.stdout.flush()
         line = Text(no_wrap=True)
@@ -289,12 +304,117 @@ class Repl:
         )
         self.console.print(line)
 
+    # ── 输入读取（带命令下拉补全）───────────────────────────────
+
+    def _read_input(self) -> str:
+        """构建 prompt_toolkit Application，实现命令下拉菜单。"""
+        dropdown: dict = {"items": [], "selected": 0}
+
+        def _refresh(text: str) -> None:
+            if text.startswith("/"):
+                prefix = text[1:].lower()
+                dropdown["items"] = [
+                    (cmd, desc) for cmd, desc in _COMMANDS
+                    if cmd[1:].startswith(prefix)
+                ]
+            else:
+                dropdown["items"] = []
+            dropdown["selected"] = 0
+
+        buf = Buffer(
+            name="main",
+            history=self._history,
+            on_text_changed=lambda b: _refresh(b.text),
+        )
+
+        # 提示符前缀：首行显示 ❯，续行对齐缩进
+        _pfx: list = [("fg:#847ACE", f"{PROMPT_SYMBOL} ")]
+        _pfx_wrap: list = [("", "  ")]
+
+        def _render_dropdown() -> FormattedText:
+            items = dropdown["items"]
+            if not items:
+                return FormattedText([])
+            col = max(len(cmd) for cmd, _ in items) + 4
+            frags = []
+            for i, (cmd, desc) in enumerate(items):
+                line = f"  {cmd:<{col}}{desc}"
+                style = "fg:#B2B9F9" if i == dropdown["selected"] else ""
+                frags.append((style, line))
+                if i < len(items) - 1:
+                    frags.append(("", "\n"))
+            return FormattedText(frags)
+
+        kb = KeyBindings()
+        _visible = Condition(lambda: bool(dropdown["items"]))
+
+        @kb.add("down", filter=_visible, eager=True)
+        def _(event):
+            dropdown["selected"] = (dropdown["selected"] + 1) % len(dropdown["items"])
+
+        @kb.add("up", filter=_visible, eager=True)
+        def _(event):
+            dropdown["selected"] = (dropdown["selected"] - 1) % len(dropdown["items"])
+
+        @kb.add("tab", filter=_visible, eager=True)
+        def _(event):
+            cmd = dropdown["items"][dropdown["selected"]][0]
+            buf.set_document(Document(cmd + " ", len(cmd) + 1))
+            dropdown["items"] = []
+
+        @kb.add("escape", eager=True)
+        def _(event):
+            dropdown["items"] = []
+
+        @kb.add("enter", eager=True)
+        @kb.add("c-j", eager=True)
+        def _(event):
+            if dropdown["items"]:
+                cmd = dropdown["items"][dropdown["selected"]][0]
+                buf.set_document(Document(cmd, len(cmd)))
+                dropdown["items"] = []
+            event.app.exit(result=buf.text)
+
+        @kb.add("c-c", eager=True)
+        def _(event):
+            event.app.exit(exception=KeyboardInterrupt())
+
+        @kb.add("c-d", eager=True)
+        def _(event):
+            if not buf.text:
+                event.app.exit(exception=EOFError())
+
+        layout = Layout(
+            HSplit([
+                Window(
+                    content=BufferControl(buffer=buf),
+                    get_line_prefix=lambda lineno, wc: _pfx if lineno == 0 and wc == 0 else _pfx_wrap,
+                    dont_extend_height=True,
+                    wrap_lines=True,
+                ),
+                ConditionalContainer(
+                    Window(
+                        content=FormattedTextControl(_render_dropdown),
+                        dont_extend_height=True,
+                    ),
+                    filter=_visible,
+                ),
+            ])
+        )
+
+        return Application(
+            layout=layout,
+            key_bindings=merge_key_bindings([kb, load_emacs_bindings()]),
+            cursor=CursorShape.BEAM,
+            mouse_support=False,
+        ).run()
+
     # ── 主循环 ───────────────────────────────────────────────────
 
     def run(self) -> None:
         while self.running:
             try:
-                user_input = pt_prompt(ANSI(self._prompt()), cursor=CursorShape.BEAM)
+                user_input = self._read_input()
             except EOFError:
                 break
             except KeyboardInterrupt:
@@ -316,14 +436,13 @@ class Repl:
             self._invoke_agent(stripped)
 
 
-# ── 辅助 ────────────────────────────────────────────────────────
+# ── 辅助函数 ─────────────────────────────────────────────────────
 
 
 def _truncate(val: Any, maxlen: int = 60) -> str:
     s = str(val)
     return s if len(s) <= maxlen else s[:maxlen] + "…"
 
-# ── 新增辅助函数（类外或类内均可）──────────────────────────────────
 
 def _display_width(s: str) -> int:
     """计算字符串的终端显示列数（全角字符占 2 列）"""
