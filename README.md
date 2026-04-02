@@ -1,6 +1,6 @@
 # MT-AutoOptimize
 
-![banner](docs/banner.png)
+![banner](docs/imgs/banner.png)
 
 ---
 
