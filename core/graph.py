@@ -13,6 +13,7 @@ from core.nodes.observation import create_observation_node, should_continue_loop
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from core.context import ContextManager
+    from core.session import SessionStats
 
 def build_agent_graph(
     llm: BaseChatModel,
@@ -21,6 +22,7 @@ def build_agent_graph(
     executor = None,
     checkpointer = None,
     context_manager: ContextManager | None = None,
+    session_stats: SessionStats | None = None,
 ) -> StateGraph:
     """
     工厂模式创建结点，构建 ReAct 循环的 LangGraph 状态图
@@ -42,7 +44,7 @@ def build_agent_graph(
             return f"[未注册工具: {tool_name}]"
 
     # 工厂模式创建结点函数
-    reasoning_node = create_reasoning_node(llm, event_bus, tool_schemas, context_manager)
+    reasoning_node = create_reasoning_node(llm, event_bus, tool_schemas, context_manager, session_stats)
     tool_routing_node = create_tool_routing_node(event_bus)
     human_approval_node = create_human_approval_node(event_bus)
     tool_execution_node = create_tool_execution_node(event_bus, executor)

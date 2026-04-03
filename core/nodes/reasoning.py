@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from core.context import ContextManager
+    from core.session import SessionStats
 
 
 def create_reasoning_node(
@@ -33,6 +34,7 @@ def create_reasoning_node(
     event_bus: EventBus,
     tool_schemas: list[dict[str, Any]] | None = None,
     context_manager: ContextManager | None = None,
+    session_stats: SessionStats | None = None,
 ) -> Callable[[AgentState], dict]:
     """
     创建 reasoning 节点函数
@@ -42,6 +44,7 @@ def create_reasoning_node(
         event_bus: 事件总线, 用于向 CLI 层推送流式事件
         tool_schemas: OpenAI function-calling 格式的工具定义列表
         context_manager: Context & Memory 管理器 (可选)
+        session_stats: 会话统计 (可选，用于记录 token usage)
 
     Returns:
         LangGraph 节点函数 ``(AgentState) -> dict``
@@ -83,8 +86,8 @@ def create_reasoning_node(
             }
 
         # 4) 收集 token usage → SessionStats
-        if context_manager is not None:
-            _record_token_usage(collected, context_manager)
+        if session_stats is not None:
+            _record_token_usage(collected, session_stats)
 
         # 5) 构造 AIMessage 写入 state.message 历史
         ai_message = AIMessage(
@@ -217,21 +220,13 @@ def _extract_tool_calls(
 
 def _record_token_usage(
     response: AIMessageChunk,
-    context_manager: ContextManager,
+    session_stats: SessionStats,
 ) -> None:
-    """从 LLM 响应中提取 token usage 并记录到 SessionStats。
-
-    LangChain 的 usage_metadata (如果模型提供) 格式:
-        {"input_tokens": int, "output_tokens": int, "total_tokens": int}
-    也支持 response_metadata.usage 格式 (OpenAI 兼容):
-        {"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}
-    """
-    stats = context_manager.session_stats
-
+    """从 LLM 响应中提取 token usage 并记录到 SessionStats。"""
     # 优先从 usage_metadata 取 (LangChain 标准)
     usage = getattr(response, "usage_metadata", None)
     if usage and isinstance(usage, dict):
-        stats.record_llm_usage(
+        session_stats.record_llm_usage(
             input_tokens=usage.get("input_tokens", 0),
             output_tokens=usage.get("output_tokens", 0),
         )
@@ -241,7 +236,7 @@ def _record_token_usage(
     resp_meta = getattr(response, "response_metadata", None) or {}
     usage = resp_meta.get("usage") or resp_meta.get("token_usage") or {}
     if usage:
-        stats.record_llm_usage(
+        session_stats.record_llm_usage(
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=usage.get("completion_tokens", 0),
         )

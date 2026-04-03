@@ -5,8 +5,6 @@ Context & Memory 管理器
   - 分层加载 CONTEXT.md（全局 Tier 1 → 项目 Tier 2）
   - 管理持久化 Memory（全局 CONTEXT.md 的 ## Agent Memories 区域）
   - 构建注入 system prompt / session_context 的上下文字符串
-  - 会话统计收集（token、duration、tool calls）
-  - 会话历史持久化（JSONL）
   - 维护内部缓存，避免重复 IO
 
 设计原则（参考 gemini-cli）:
@@ -19,142 +17,21 @@ Context & Memory 管理器
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import os
 import re
 import time
-import uuid
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from core.utils.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
 # gemini-cli 风格: Agent 记忆写入的 section 标题
 MEMORY_SECTION_HEADER = "## Agent Memories"
 
-
-# ---------------------------------------------------------------------------
-# Token 估算 (参考 gemini-cli tokenCalculation.ts)
-# ---------------------------------------------------------------------------
-
-def estimate_tokens(text: str) -> int:
-    """
-    启发式 token 估算，不引入 tokenizer 依赖。
-
-    - ASCII: ~4 字符/token
-    - 非 ASCII (CJK): ~1.3 token/字符
-    """
-    ascii_chars = sum(1 for c in text if ord(c) < 128)
-    non_ascii_chars = len(text) - ascii_chars
-    return int(ascii_chars / 4 + non_ascii_chars * 1.3)
-
-
-def format_relative_time(timestamp_ms: int) -> str:
-    """将毫秒时间戳转为相对时间描述（如 '2 hours ago'）。"""
-    if not timestamp_ms:
-        return "unknown"
-    diff = time.time() - timestamp_ms / 1000
-    if diff < 60:
-        return "just now"
-    if diff < 3600:
-        m = int(diff / 60)
-        return f"{m} min{'s' if m > 1 else ''} ago"
-    if diff < 86400:
-        h = int(diff / 3600)
-        return f"{h} hour{'s' if h > 1 else ''} ago"
-    d = int(diff / 86400)
-    if d == 1:
-        return "1 day ago"
-    return f"{d} days ago"
-
-
-def format_file_size(size_bytes: int) -> str:
-    """格式化文件大小。"""
-    if size_bytes < 1024:
-        return f"{size_bytes}B"
-    if size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f}KB"
-    return f"{size_bytes / (1024 * 1024):.1f}MB"
-
-
-# ---------------------------------------------------------------------------
-# Session Stats (参考 gemini-cli SessionMetrics)
-# ---------------------------------------------------------------------------
-
-@dataclass
-class SessionStats:
-    """会话期间的实时统计，退出时渲染到 CLI。"""
-
-    session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    start_time: float = field(default_factory=time.time)
-    model: str = ""
-
-    # Token 统计
-    total_input_tokens: int = 0
-    total_output_tokens: int = 0
-    total_tokens: int = 0
-
-    # 轮次统计
-    turn_count: int = 0
-    prompt_count: int = 0
-
-    # 工具统计
-    tool_calls_total: int = 0
-    tool_calls_success: int = 0
-    tool_calls_failed: int = 0
-    tool_calls_by_name: dict[str, int] = field(default_factory=dict)
-
-    @property
-    def duration_seconds(self) -> float:
-        return time.time() - self.start_time
-
-    def record_llm_usage(self, input_tokens: int, output_tokens: int, model: str = "") -> None:
-        """记录一次 LLM 调用的 token 用量。"""
-        self.total_input_tokens += input_tokens
-        self.total_output_tokens += output_tokens
-        self.total_tokens += input_tokens + output_tokens
-        self.turn_count += 1
-        if model:
-            self.model = model
-
-    def record_tool_call(self, tool_name: str, success: bool) -> None:
-        """记录一次工具调用。"""
-        self.tool_calls_total += 1
-        if success:
-            self.tool_calls_success += 1
-        else:
-            self.tool_calls_failed += 1
-        self.tool_calls_by_name[tool_name] = self.tool_calls_by_name.get(tool_name, 0) + 1
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 dict（用于 session_end 记录）。"""
-        return {
-            "session_id": self.session_id,
-            "model": self.model,
-            "duration_ms": int(self.duration_seconds * 1000),
-            "turns": self.turn_count,
-            "prompts": self.prompt_count,
-            "tokens": {
-                "input": self.total_input_tokens,
-                "output": self.total_output_tokens,
-                "total": self.total_tokens,
-            },
-            "tools": {
-                "total": self.tool_calls_total,
-                "success": self.tool_calls_success,
-                "failed": self.tool_calls_failed,
-                "by_name": dict(self.tool_calls_by_name),
-            },
-        }
-
-
-# ---------------------------------------------------------------------------
-# ContextManager
-# ---------------------------------------------------------------------------
 
 class ContextManager:
     """
@@ -175,15 +52,10 @@ class ContextManager:
         self._config = config
 
         # 内部缓存
-        self._global_context: str = ""        # 全局 CONTEXT.md 全文（含 Memories）
-        self._project_context: str = ""       # 项目 CONTEXT.md
+        self._global_context: str = ""
+        self._project_context: str = ""
         self._loaded_files: list[str] = []
         self._last_loaded_at: float = 0.0
-
-        # Session
-        self.session_stats = SessionStats()
-        self._session_records: list[dict] = []
-        self._resumed_from: Path | None = None  # resume 时记录原文件路径
 
     # ------------------------------------------------------------------
     # 公开 API — 加载
@@ -270,7 +142,6 @@ class ContextManager:
 
         参考 gemini-cli 的 memoryTool.ts: 追加为 Markdown 列表项。
         """
-        # 清理: 移除换行、首尾空白、开头的 dash
         sanitized = re.sub(r"[\r\n]+", " ", fact).strip().lstrip("- ")
         if not sanitized:
             return
@@ -282,8 +153,6 @@ class ContextManager:
         new_content = self._append_memory_to_content(content, sanitized)
 
         global_path.write_text(new_content, encoding="utf-8")
-
-        # 刷新缓存
         self._global_context = new_content
         logger.info("Saved memory: %s", sanitized[:60])
 
@@ -300,190 +169,6 @@ class ContextManager:
         memories.pop(index)
         self._rewrite_memories(memories)
         return True
-
-    # ------------------------------------------------------------------
-    # 公开 API — Session History 持久化
-    # ------------------------------------------------------------------
-
-    def record_message(self, record: dict) -> None:
-        """记录一条会话消息（追加到内存缓冲区）。"""
-        if "timestamp" not in record:
-            record["timestamp"] = int(time.time() * 1000)
-        self._session_records.append(record)
-
-    def flush_session(self) -> Path | None:
-        """
-        将会话记录写入磁盘 JSONL 文件。
-
-        在会话结束（REPL quit）时调用。
-        如果是 resume 的会话，合并旧消息并删除旧文件。
-        返回写入的文件路径，如果无记录则返回 None。
-        """
-        if not self._session_records:
-            return None
-
-        # 如果是 resume 的会话，先加载旧消息到前面
-        all_records = []
-        if self._resumed_from and self._resumed_from.is_file():
-            old_records = self.load_session(self._resumed_from)
-            all_records.extend(old_records)
-
-        all_records.extend(self._session_records)
-
-        # session_start 记录
-        start_record = {
-            "type": "session_start",
-            "sessionId": self.session_stats.session_id,
-            "project": str(self._working_dir),
-            "model": self.session_stats.model,
-            "branch": self._get_git_branch(),
-            "timestamp": int(self.session_stats.start_time * 1000),
-        }
-
-        # session_end 记录
-        end_record = {
-            "type": "session_end",
-            "sessionId": self.session_stats.session_id,
-            "stats": self.session_stats.to_dict(),
-            "timestamp": int(time.time() * 1000),
-        }
-
-        # 写入新文件
-        history_dir = self._get_history_dir()
-        history_dir.mkdir(parents=True, exist_ok=True)
-
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        sid = self.session_stats.session_id
-        filepath = history_dir / f"session-{ts}-{sid}.jsonl"
-
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(json.dumps(start_record, ensure_ascii=False) + "\n")
-            for record in all_records:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            f.write(json.dumps(end_record, ensure_ascii=False) + "\n")
-
-        # 删除旧文件
-        if self._resumed_from and self._resumed_from.is_file() and self._resumed_from != filepath:
-            try:
-                self._resumed_from.unlink()
-                logger.info("Deleted old session file: %s", self._resumed_from)
-            except OSError as e:
-                logger.warning("Failed to delete old session file: %s", e)
-
-        logger.info("Session history saved to %s (%d records)", filepath, len(self._session_records))
-        return filepath
-
-    def list_sessions(self) -> list[dict[str, Any]]:
-        """
-        列出当前项目的所有历史会话。
-
-        返回按时间倒序排列的会话摘要列表::
-
-            [
-                {
-                    "session_id": "abc123",
-                    "model": "deepseek-chat",
-                    "timestamp": 1775115575203,
-                    "first_user_message": "请分析这段代码",
-                    "message_count": 12,
-                    "filepath": Path(...),
-                },
-                ...
-            ]
-        """
-        history_dir = self._get_history_dir()
-        if not history_dir.is_dir():
-            return []
-
-        sessions: list[dict[str, Any]] = []
-
-        for filepath in sorted(
-            history_dir.glob("session-*.jsonl"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        ):
-            try:
-                info = self._parse_session_file(filepath)
-                if info:
-                    sessions.append(info)
-            except Exception as e:
-                logger.warning("Skipping corrupt session file %s: %s", filepath, e)
-
-        return sessions
-
-    def load_session(self, filepath: Path) -> list[dict]:
-        """
-        加载指定会话文件的消息记录。
-
-        返回所有渲染相关的记录（不含 session_start/session_end）。
-        """
-        _RENDERABLE = {"user", "assistant", "thought", "tool_request", "tool_complete", "tool_diff", "tool_call"}
-        records: list[dict] = []
-        for line in filepath.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-                if record.get("type") in _RENDERABLE:
-                    records.append(record)
-            except json.JSONDecodeError:
-                continue
-        return records
-
-    @staticmethod
-    def _parse_session_file(filepath: Path) -> dict[str, Any] | None:
-        """解析 JSONL 会话文件，提取摘要信息。"""
-        session_id = ""
-        model = ""
-        branch = ""
-        timestamp = 0
-        first_user_msg = ""
-        message_count = 0
-
-        for line in filepath.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            rtype = record.get("type", "")
-
-            if rtype == "session_start":
-                session_id = record.get("sessionId", "")
-                model = record.get("model", "")
-                branch = record.get("branch", "")
-                timestamp = record.get("timestamp", 0)
-            elif rtype == "user":
-                message_count += 1
-                if not first_user_msg:
-                    display = record.get("display", record.get("content", ""))
-                    first_user_msg = display[:80]
-            elif rtype == "assistant":
-                message_count += 1
-
-        if not first_user_msg:
-            return None
-
-        # file size
-        try:
-            file_size = filepath.stat().st_size
-        except OSError:
-            file_size = 0
-
-        return {
-            "session_id": session_id,
-            "model": model,
-            "branch": branch,
-            "timestamp": timestamp,
-            "first_user_message": first_user_msg,
-            "message_count": message_count,
-            "file_size": file_size,
-            "filepath": filepath,
-        }
 
     # ------------------------------------------------------------------
     # 公开 API — 状态查询
@@ -512,7 +197,6 @@ class ContextManager:
     # ------------------------------------------------------------------
 
     def _load_global_context(self) -> str:
-        """加载全局 CONTEXT.md（~/.mtagent/CONTEXT.md）。"""
         filepath = self._get_global_context_path()
         content = self._read_file_safe(filepath)
         if content:
@@ -520,17 +204,14 @@ class ContextManager:
         return content
 
     def _load_project_context(self) -> str:
-        """加载项目根目录的 CONTEXT.md。"""
         file_names: list[str] = self._config.get("file_names", ["CONTEXT.md"])
         parts: list[str] = []
-
         for name in file_names:
             filepath = self._working_dir / name
             content = self._read_file_safe(filepath)
             if content:
                 parts.append(content)
                 self._loaded_files.append(str(filepath))
-
         return "\n\n".join(parts)
 
     # ------------------------------------------------------------------
@@ -539,42 +220,28 @@ class ContextManager:
 
     @staticmethod
     def _parse_memories(content: str) -> list[str]:
-        """从 CONTEXT.md 内容中解析 ## Agent Memories 下的列表项。"""
         if MEMORY_SECTION_HEADER not in content:
             return []
-
-        # 找到 section 开始位置
         idx = content.index(MEMORY_SECTION_HEADER)
         section_content = content[idx + len(MEMORY_SECTION_HEADER):]
-
-        # 截取到下一个 ## 或文件末尾
         next_section = re.search(r"\n## ", section_content)
         if next_section:
             section_content = section_content[:next_section.start()]
-
-        # 解析列表项
         memories = []
         for line in section_content.splitlines():
             line = line.strip()
             if line.startswith("- "):
                 memories.append(line[2:].strip())
-
         return memories
 
     @staticmethod
     def _append_memory_to_content(content: str, fact: str) -> str:
-        """将 fact 追加到 content 的 ## Agent Memories 区域。"""
         new_item = f"- {fact}"
-
         if MEMORY_SECTION_HEADER not in content:
-            # 文件中没有该 section，在末尾创建
             separator = "\n\n" if content.strip() else ""
             return content.rstrip() + separator + f"{MEMORY_SECTION_HEADER}\n\n{new_item}\n"
-
-        # 找到 section 末尾（下一个 ## 或文件末尾），在其前面插入
         idx = content.index(MEMORY_SECTION_HEADER)
         after_header = content[idx + len(MEMORY_SECTION_HEADER):]
-
         next_section = re.search(r"\n## ", after_header)
         if next_section:
             insert_pos = idx + len(MEMORY_SECTION_HEADER) + next_section.start()
@@ -583,17 +250,12 @@ class ContextManager:
             return content.rstrip() + "\n" + new_item + "\n"
 
     def _rewrite_memories(self, memories: list[str]) -> None:
-        """用新的 memories 列表重写全局 CONTEXT.md 的 ## Agent Memories 区域。"""
         global_path = self._get_global_context_path()
         content = self._read_file_safe(global_path)
-
         if MEMORY_SECTION_HEADER not in content:
             return
-
-        # 找到 section 范围
         idx = content.index(MEMORY_SECTION_HEADER)
         after_header = content[idx + len(MEMORY_SECTION_HEADER):]
-
         next_section = re.search(r"\n## ", after_header)
         if next_section:
             before = content[:idx + len(MEMORY_SECTION_HEADER)]
@@ -601,14 +263,11 @@ class ContextManager:
         else:
             before = content[:idx + len(MEMORY_SECTION_HEADER)]
             after = ""
-
-        # 重建 section
         if memories:
             items = "\n".join(f"- {m}" for m in memories)
             new_section = f"\n\n{items}\n"
         else:
             new_section = "\n"
-
         new_content = before + new_section + after
         global_path.write_text(new_content, encoding="utf-8")
         self._global_context = new_content
@@ -618,17 +277,9 @@ class ContextManager:
     # ------------------------------------------------------------------
 
     def _get_global_context_path(self) -> Path:
-        """全局 CONTEXT.md 路径。"""
         global_dir = Path(self._config.get("global_dir", "~/.mtagent")).expanduser()
-        # 取 file_names 中的第一个作为全局文件名
         file_names = self._config.get("file_names", ["CONTEXT.md"])
         return global_dir / file_names[0]
-
-    def _get_history_dir(self) -> Path:
-        """会话历史目录: ~/.mtagent/history/{projectHash}/"""
-        global_dir = Path(self._config.get("global_dir", "~/.mtagent")).expanduser()
-        project_hash = hashlib.md5(str(self._working_dir).encode()).hexdigest()[:10]
-        return global_dir / "history" / project_hash
 
     # ------------------------------------------------------------------
     # 内部实现 — IO 辅助
@@ -636,25 +287,9 @@ class ContextManager:
 
     @staticmethod
     def _read_file_safe(filepath: Path) -> str:
-        """安全读取文件，不存在时返回空字符串。"""
         try:
             if filepath.is_file():
                 return filepath.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError) as e:
             logger.warning("Failed to read %s: %s", filepath, e)
-        return ""
-
-    def _get_git_branch(self) -> str:
-        """获取当前 git 分支名，失败返回空字符串。"""
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=self._working_dir,
-                capture_output=True, text=True, timeout=3,
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except Exception:
-            pass
         return ""

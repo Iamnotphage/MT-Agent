@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from core.context import ContextManager, SessionStats, estimate_tokens, MEMORY_SECTION_HEADER
+from core.context import ContextManager, MEMORY_SECTION_HEADER
+from core.session import SessionStats, SessionRecorder
+from core.utils.tokens import estimate_tokens
 from config.settings import CONTEXT as DEFAULT_CONFIG
 
 
@@ -291,23 +293,27 @@ class TestMemoryCRUD:
 
 
 # ---------------------------------------------------------------------------
-# ContextManager — Session History
+# SessionRecorder — 会话历史
 # ---------------------------------------------------------------------------
 
+@pytest.fixture
+def recorder(tmp_workspace, config):
+    """创建 SessionRecorder 实例。"""
+    tmp_workspace.mkdir(parents=True, exist_ok=True)
+    return SessionRecorder(working_directory=str(tmp_workspace), config=config)
+
+
 class TestSessionHistory:
-    def test_record_and_flush(self, cm, config):
+    def test_record_and_flush(self, recorder):
         """记录消息并 flush 到磁盘。"""
-        cm.load()
+        recorder.record({"type": "user", "display": "hello"})
+        recorder.record({"type": "assistant", "content": "hi"})
 
-        cm.record_message({"type": "user", "display": "hello"})
-        cm.record_message({"type": "assistant", "content": "hi"})
-
-        filepath = cm.flush_session()
+        filepath = recorder.flush()
         assert filepath is not None
         assert filepath.exists()
         assert filepath.suffix == ".jsonl"
 
-        # 验证文件内容
         lines = filepath.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) == 4  # session_start + 2 messages + session_end
 
@@ -319,16 +325,14 @@ class TestSessionHistory:
         assert end["type"] == "session_end"
         assert "stats" in end
 
-    def test_flush_empty_returns_none(self, cm):
+    def test_flush_empty_returns_none(self, recorder):
         """没有记录时返回 None。"""
-        cm.load()
-        assert cm.flush_session() is None
+        assert recorder.flush() is None
 
-    def test_records_have_timestamp(self, cm):
+    def test_records_have_timestamp(self, recorder):
         """自动添加 timestamp。"""
-        cm.load()
-        cm.record_message({"type": "user", "display": "test"})
-        assert "timestamp" in cm._session_records[0]
+        recorder.record({"type": "user", "display": "test"})
+        assert "timestamp" in recorder._records[0]
 
 
 # ---------------------------------------------------------------------------
@@ -419,128 +423,105 @@ class TestSaveMemoryTool:
 
 
 # ---------------------------------------------------------------------------
-# ContextManager — Session 列表和加载
+# SessionRecorder — Session 列表和加载
 # ---------------------------------------------------------------------------
 
 class TestSessionListAndLoad:
-    def test_list_sessions_empty(self, cm):
+    def test_list_sessions_empty(self, recorder):
         """无历史会话时返回空列表。"""
-        cm.load()
-        assert cm.list_sessions() == []
+        assert recorder.list_sessions() == []
 
-    def test_list_sessions_after_flush(self, cm, config):
+    def test_list_sessions_after_flush(self, recorder):
         """flush 后能列出该会话。"""
-        (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
-        cm.load()
+        recorder.record({"type": "user", "display": "hello"})
+        recorder.record({"type": "assistant", "content": "hi there"})
+        recorder.flush()
 
-        cm.record_message({"type": "user", "display": "hello"})
-        cm.record_message({"type": "assistant", "content": "hi there"})
-        cm.flush_session()
-
-        sessions = cm.list_sessions()
+        sessions = recorder.list_sessions()
         assert len(sessions) == 1
         assert sessions[0]["first_user_message"] == "hello"
         assert sessions[0]["message_count"] == 2
-        assert sessions[0]["session_id"] == cm.session_stats.session_id
+        assert sessions[0]["session_id"] == recorder.stats.session_id
 
     def test_list_sessions_sorted_descending(self, tmp_workspace, config):
         """多个会话按时间倒序排列。"""
         tmp_workspace.mkdir(parents=True, exist_ok=True)
 
-        # 创建两个会话
-        cm1 = ContextManager(working_directory=str(tmp_workspace), config=config)
-        cm1.load()
-        cm1.record_message({"type": "user", "display": "first session"})
-        cm1.flush_session()
+        r1 = SessionRecorder(working_directory=str(tmp_workspace), config=config)
+        r1.record({"type": "user", "display": "first session"})
+        r1.flush()
 
         import time as _time
-        _time.sleep(0.05)  # 确保时间戳不同
+        _time.sleep(0.05)
 
-        cm2 = ContextManager(working_directory=str(tmp_workspace), config=config)
-        cm2.load()
-        cm2.record_message({"type": "user", "display": "second session"})
-        cm2.flush_session()
+        r2 = SessionRecorder(working_directory=str(tmp_workspace), config=config)
+        r2.record({"type": "user", "display": "second session"})
+        r2.flush()
 
-        sessions = cm2.list_sessions()
+        sessions = r2.list_sessions()
         assert len(sessions) == 2
-        # 最新的排前面
         assert sessions[0]["first_user_message"] == "second session"
         assert sessions[1]["first_user_message"] == "first session"
 
-    def test_load_session(self, cm, config):
+    def test_load_session(self, recorder):
         """加载会话返回正确的消息记录。"""
-        (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
-        cm.load()
+        recorder.record({"type": "user", "display": "what is 1+1"})
+        recorder.record({"type": "assistant", "content": "2"})
+        recorder.record({"type": "tool_call", "toolName": "calc", "status": "success"})
+        filepath = recorder.flush()
 
-        cm.record_message({"type": "user", "display": "what is 1+1"})
-        cm.record_message({"type": "assistant", "content": "2"})
-        cm.record_message({"type": "tool_call", "toolName": "calc", "status": "success"})
-        filepath = cm.flush_session()
-
-        records = cm.load_session(filepath)
+        records = recorder.load_session(filepath)
         assert len(records) == 3
         assert records[0]["type"] == "user"
         assert records[1]["type"] == "assistant"
         assert records[2]["type"] == "tool_call"
 
-    def test_load_session_skips_metadata(self, cm, config):
+    def test_load_session_skips_metadata(self, recorder):
         """加载时跳过 session_start 和 session_end 记录。"""
-        (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
-        cm.load()
+        recorder.record({"type": "user", "display": "hi"})
+        filepath = recorder.flush()
 
-        cm.record_message({"type": "user", "display": "hi"})
-        filepath = cm.flush_session()
-
-        records = cm.load_session(filepath)
+        records = recorder.load_session(filepath)
         types = [r["type"] for r in records]
         assert "session_start" not in types
         assert "session_end" not in types
 
-    def test_list_sessions_skips_empty(self, cm, config):
+    def test_list_sessions_skips_empty(self, recorder):
         """没有用户消息的会话不出现在列表中。"""
-        (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
-        cm.load()
+        recorder.record({"type": "assistant", "content": "hello"})
+        recorder.flush()
 
-        # 只记录一条 assistant 消息（无 user message）
-        cm.record_message({"type": "assistant", "content": "hello"})
-        cm.flush_session()
-
-        sessions = cm.list_sessions()
-        assert len(sessions) == 0  # 没有 first_user_message → 被过滤
+        sessions = recorder.list_sessions()
+        assert len(sessions) == 0
 
     def test_resume_merges_and_deletes_old(self, tmp_workspace, config):
         """resume 后 flush 应合并旧消息并删除旧文件。"""
         tmp_workspace.mkdir(parents=True, exist_ok=True)
 
         # 第一次会话: [A, B]
-        cm1 = ContextManager(working_directory=str(tmp_workspace), config=config)
-        cm1.load()
-        cm1.record_message({"type": "user", "display": "A"})
-        cm1.record_message({"type": "assistant", "content": "B"})
-        old_path = cm1.flush_session()
+        r1 = SessionRecorder(working_directory=str(tmp_workspace), config=config)
+        r1.record({"type": "user", "display": "A"})
+        r1.record({"type": "assistant", "content": "B"})
+        old_path = r1.flush()
         assert old_path.exists()
 
         # 第二次会话: resume 后新增 [C, D]
-        cm2 = ContextManager(working_directory=str(tmp_workspace), config=config)
-        cm2.load()
-        cm2._resumed_from = old_path  # 模拟 resume
-        cm2.record_message({"type": "user", "display": "C"})
-        cm2.record_message({"type": "assistant", "content": "D"})
+        r2 = SessionRecorder(working_directory=str(tmp_workspace), config=config)
+        r2._resumed_from = old_path
+        r2.record({"type": "user", "display": "C"})
+        r2.record({"type": "assistant", "content": "D"})
 
         import time as _time
         _time.sleep(0.05)
 
-        new_path = cm2.flush_session()
+        new_path = r2.flush()
 
-        # 旧文件应被删除
         assert not old_path.exists()
 
-        # 新文件应包含 [A, B, C, D]
-        records = cm2.load_session(new_path)
+        records = r2.load_session(new_path)
         assert len(records) == 4
         displays = [r.get("display", r.get("content")) for r in records]
         assert displays == ["A", "B", "C", "D"]
 
-        # 只有一个会话文件
-        sessions = cm2.list_sessions()
+        sessions = r2.list_sessions()
         assert len(sessions) == 1

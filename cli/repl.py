@@ -85,17 +85,17 @@ class Repl:
             self._streaming = False
         # flush 累积的 thought → 录制
         if self._thought_buf:
-            self.runtime.context_manager.record_message({
+            self.runtime.session.record({
                 "type": "thought",
                 "text": "".join(self._thought_buf),
             })
             self._thought_buf.clear()
         # flush 累积的 content → 录制为 assistant
         if self._content_buf:
-            self.runtime.context_manager.record_message({
+            self.runtime.session.record({
                 "type": "assistant",
                 "content": "".join(self._content_buf),
-                "model": self.runtime.context_manager.session_stats.model,
+                "model": self.runtime.session.stats.model,
             })
             self._content_buf.clear()
 
@@ -136,7 +136,7 @@ class Repl:
                 f"[dim]({args_brief})[/dim]"
             )
         # 录制
-        self.runtime.context_manager.record_message({
+        self.runtime.session.record({
             "type": "tool_request",
             "tool_name": name,
             "arguments": args,
@@ -152,7 +152,7 @@ class Repl:
                 err = event.data.get("error_msg", "unknown")
                 self.console.print(f"  [red]✗[/red] [dim]{name} 失败: {err}[/dim]")
             # 录制 (diff 已在 _on_tool_live_output 中录制)
-            self.runtime.context_manager.record_message({
+            self.runtime.session.record({
                 "type": "tool_complete",
                 "tool_name": name,
                 "status": status,
@@ -171,7 +171,7 @@ class Repl:
             self.console.print(f"  [yellow]⊘[/yellow] [dim]{name} 已取消[/dim]")
 
         # 录制
-        self.runtime.context_manager.record_message({
+        self.runtime.session.record({
             "type": "tool_complete",
             "tool_name": name,
             "status": status,
@@ -186,7 +186,7 @@ class Repl:
             render_diff(self.console, event.data["diff"])
             # 录制 diff 原始数据
             diff_obj = event.data["diff"]
-            self.runtime.context_manager.record_message({
+            self.runtime.session.record({
                 "type": "tool_diff",
                 "tool_name": event.data.get("tool_name", ""),
                 "unified_diff": diff_obj.unified_diff,
@@ -207,9 +207,9 @@ class Repl:
         from langchain_core.messages import HumanMessage
 
         # 记录用户消息
-        cm = self.runtime.context_manager
-        cm.session_stats.prompt_count += 1
-        cm.record_message({
+        session = self.runtime.session
+        session.stats.prompt_count += 1
+        session.record({
             "type": "user",
             "display": user_input,
         })
@@ -316,21 +316,15 @@ class Repl:
 
     def _on_exit(self) -> None:
         """退出时: flush 会话历史 + 渲染统计 + 告别。"""
-        cm = self.runtime.context_manager
-
-        # Flush session history to disk
-        filepath = cm.flush_session()
+        filepath = self.runtime.session.flush()
         if filepath:
             self.console.print(f"\n  [dim]会话已保存 → {filepath}[/dim]")
-
-        # Render stats
         self._render_session_stats()
-
         self.console.print("  [dim]再见！[/dim]\n")
 
     def _render_session_stats(self) -> None:
         """渲染会话统计摘要。"""
-        stats = self.runtime.context_manager.session_stats
+        stats = self.runtime.session.stats
 
         # 如果没有任何交互，跳过
         if stats.turn_count == 0 and stats.prompt_count == 0:
@@ -383,7 +377,7 @@ class Repl:
                 self._on_exit()
                 return False
             case "/version" | "/v":
-                from cli.app import VERSION
+                from app import VERSION
                 self.console.print(f"  [dim]v{VERSION}[/dim]")
             case "/clear":
                 self.console.clear()
@@ -509,10 +503,9 @@ class Repl:
     def _cmd_resume(self) -> None:
         """交互式浏览并恢复历史会话。"""
         from langchain_core.messages import AIMessage, HumanMessage
-        from core.context import format_relative_time, format_file_size
 
-        cm = self.runtime.context_manager
-        sessions = cm.list_sessions()
+        session = self.runtime.session
+        sessions = session.list_sessions()
 
         if not sessions:
             self.console.print("  [dim]暂无历史会话。[/dim]")
@@ -527,7 +520,7 @@ class Repl:
         filepath = selected["filepath"]
 
         # 加载会话消息
-        records = cm.load_session(filepath)
+        records = session.load_session(filepath)
         if not records:
             self.console.print("  [red]会话为空，无法恢复[/red]")
             return
@@ -561,14 +554,14 @@ class Repl:
             return
 
         # 标记为 resume
-        cm._resumed_from = filepath
+        session._resumed_from = filepath
 
         # 渲染历史消息到 CLI
         self._render_resumed_history(records)
 
     def _session_picker(self, sessions: list[dict]) -> dict | None:
         """用 prompt_toolkit 实现上下键 + 回车的交互式会话选择。"""
-        from core.context import format_relative_time, format_file_size
+        from core.session import format_relative_time, format_file_size
 
         state = {"selected": 0}
 

@@ -14,6 +14,7 @@ from typing import Any
 from config import load_llm_config
 from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.context import ContextManager
+from core.session import SessionRecorder
 from core.event_bus import EventBus
 from core.graph import build_agent_graph
 from core.llm import create_chat_model
@@ -29,6 +30,7 @@ class AgentRuntime:
     registry: ToolRegistry
     workspace: str
     context_manager: ContextManager
+    session: SessionRecorder
 
 
 def _make_sync_executor(registry: ToolRegistry, event_bus: EventBus):
@@ -78,7 +80,9 @@ def create_agent_runtime(
     ws = workspace or os.getcwd()
     ctx_manager = ContextManager(working_directory=ws, config=CONTEXT_CONFIG)
     ctx_manager.load()
-    ctx_manager.session_stats.model = llm_cfg["model"]
+
+    session = SessionRecorder(working_directory=ws, config=CONTEXT_CONFIG)
+    session.stats.model = llm_cfg["model"]
 
     registry = ToolRegistry()
     registry.register(*create_default_tools(
@@ -93,6 +97,7 @@ def create_agent_runtime(
         executor=_make_sync_executor(registry, event_bus),
         checkpointer=MemorySaver(),
         context_manager=ctx_manager,
+        session_stats=session.stats,
     )
 
     return AgentRuntime(
@@ -101,4 +106,5 @@ def create_agent_runtime(
         registry=registry,
         workspace=ws,
         context_manager=ctx_manager,
+        session=session,
     )
