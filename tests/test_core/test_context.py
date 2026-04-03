@@ -416,3 +416,131 @@ class TestSaveMemoryTool:
         schema = tool.schema
         assert schema["function"]["name"] == "save_memory"
         assert "fact" in schema["function"]["parameters"]["properties"]
+
+
+# ---------------------------------------------------------------------------
+# ContextManager — Session 列表和加载
+# ---------------------------------------------------------------------------
+
+class TestSessionListAndLoad:
+    def test_list_sessions_empty(self, cm):
+        """无历史会话时返回空列表。"""
+        cm.load()
+        assert cm.list_sessions() == []
+
+    def test_list_sessions_after_flush(self, cm, config):
+        """flush 后能列出该会话。"""
+        (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
+        cm.load()
+
+        cm.record_message({"type": "user", "display": "hello"})
+        cm.record_message({"type": "assistant", "content": "hi there"})
+        cm.flush_session()
+
+        sessions = cm.list_sessions()
+        assert len(sessions) == 1
+        assert sessions[0]["first_user_message"] == "hello"
+        assert sessions[0]["message_count"] == 2
+        assert sessions[0]["session_id"] == cm.session_stats.session_id
+
+    def test_list_sessions_sorted_descending(self, tmp_workspace, config):
+        """多个会话按时间倒序排列。"""
+        tmp_workspace.mkdir(parents=True, exist_ok=True)
+
+        # 创建两个会话
+        cm1 = ContextManager(working_directory=str(tmp_workspace), config=config)
+        cm1.load()
+        cm1.record_message({"type": "user", "display": "first session"})
+        cm1.flush_session()
+
+        import time as _time
+        _time.sleep(0.05)  # 确保时间戳不同
+
+        cm2 = ContextManager(working_directory=str(tmp_workspace), config=config)
+        cm2.load()
+        cm2.record_message({"type": "user", "display": "second session"})
+        cm2.flush_session()
+
+        sessions = cm2.list_sessions()
+        assert len(sessions) == 2
+        # 最新的排前面
+        assert sessions[0]["first_user_message"] == "second session"
+        assert sessions[1]["first_user_message"] == "first session"
+
+    def test_load_session(self, cm, config):
+        """加载会话返回正确的消息记录。"""
+        (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
+        cm.load()
+
+        cm.record_message({"type": "user", "display": "what is 1+1"})
+        cm.record_message({"type": "assistant", "content": "2"})
+        cm.record_message({"type": "tool_call", "toolName": "calc", "status": "success"})
+        filepath = cm.flush_session()
+
+        records = cm.load_session(filepath)
+        assert len(records) == 3
+        assert records[0]["type"] == "user"
+        assert records[1]["type"] == "assistant"
+        assert records[2]["type"] == "tool_call"
+
+    def test_load_session_skips_metadata(self, cm, config):
+        """加载时跳过 session_start 和 session_end 记录。"""
+        (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
+        cm.load()
+
+        cm.record_message({"type": "user", "display": "hi"})
+        filepath = cm.flush_session()
+
+        records = cm.load_session(filepath)
+        types = [r["type"] for r in records]
+        assert "session_start" not in types
+        assert "session_end" not in types
+
+    def test_list_sessions_skips_empty(self, cm, config):
+        """没有用户消息的会话不出现在列表中。"""
+        (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
+        cm.load()
+
+        # 只记录一条 assistant 消息（无 user message）
+        cm.record_message({"type": "assistant", "content": "hello"})
+        cm.flush_session()
+
+        sessions = cm.list_sessions()
+        assert len(sessions) == 0  # 没有 first_user_message → 被过滤
+
+    def test_resume_merges_and_deletes_old(self, tmp_workspace, config):
+        """resume 后 flush 应合并旧消息并删除旧文件。"""
+        tmp_workspace.mkdir(parents=True, exist_ok=True)
+
+        # 第一次会话: [A, B]
+        cm1 = ContextManager(working_directory=str(tmp_workspace), config=config)
+        cm1.load()
+        cm1.record_message({"type": "user", "display": "A"})
+        cm1.record_message({"type": "assistant", "content": "B"})
+        old_path = cm1.flush_session()
+        assert old_path.exists()
+
+        # 第二次会话: resume 后新增 [C, D]
+        cm2 = ContextManager(working_directory=str(tmp_workspace), config=config)
+        cm2.load()
+        cm2._resumed_from = old_path  # 模拟 resume
+        cm2.record_message({"type": "user", "display": "C"})
+        cm2.record_message({"type": "assistant", "content": "D"})
+
+        import time as _time
+        _time.sleep(0.05)
+
+        new_path = cm2.flush_session()
+
+        # 旧文件应被删除
+        assert not old_path.exists()
+
+        # 新文件应包含 [A, B, C, D]
+        records = cm2.load_session(new_path)
+        assert len(records) == 4
+        displays = [r.get("display", r.get("content")) for r in records]
+        assert displays == ["A", "B", "C", "D"]
+
+        # 只有一个会话文件
+        sessions = cm2.list_sessions()
+        assert len(sessions) == 1

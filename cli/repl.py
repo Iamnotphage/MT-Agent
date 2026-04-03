@@ -42,6 +42,7 @@ _BG_USER = "on #252530"
 _COMMANDS = [
     ("/clear",   "清屏"),
     ("/new",     "开启新会话 (清空对话历史)"),
+    ("/resume",  "恢复历史会话"),
     ("/context", "查看/刷新上下文 (show|reload)"),
     ("/memory",  "管理记忆 (list|add|remove)"),
     ("/help",    "显示帮助信息"),
@@ -62,6 +63,8 @@ class Repl:
         self._streaming = False
         self._last_tool_had_diff = False
         self._history = InMemoryHistory()
+        self._content_buf: list[str] = []   # 累积流式 content chunks
+        self._thought_buf: list[str] = []   # 累积流式 thought chunks
 
         self._bind_events()
 
@@ -80,6 +83,21 @@ class Repl:
         if self._streaming:
             self.console.print()
             self._streaming = False
+        # flush 累积的 thought → 录制
+        if self._thought_buf:
+            self.runtime.context_manager.record_message({
+                "type": "thought",
+                "text": "".join(self._thought_buf),
+            })
+            self._thought_buf.clear()
+        # flush 累积的 content → 录制为 assistant
+        if self._content_buf:
+            self.runtime.context_manager.record_message({
+                "type": "assistant",
+                "content": "".join(self._content_buf),
+                "model": self.runtime.context_manager.session_stats.model,
+            })
+            self._content_buf.clear()
 
     def _on_content(self, event: AgentEvent) -> None:
         text = event.data.get("text", "")
@@ -89,6 +107,8 @@ class Repl:
             self.console.print()
             self._streaming = True
         self.console.print(text, end="", highlight=False, markup=False)
+        # 录制：累积到 _current_content_buf，在 _end_stream 时写入
+        self._content_buf.append(text)
 
     def _on_thought(self, event: AgentEvent) -> None:
         text = event.data.get("text", "")
@@ -96,6 +116,8 @@ class Repl:
             return
         self._end_stream()
         self.console.print(f"  [dim italic]{text}[/dim italic]", end="", highlight=False)
+        # 录制
+        self._thought_buf.append(text)
 
     def _on_tool_request(self, event: AgentEvent) -> None:
         self._end_stream()
@@ -113,6 +135,12 @@ class Repl:
                 f"\n  [bold cyan]⏺ {display}[/bold cyan]"
                 f"[dim]({args_brief})[/dim]"
             )
+        # 录制
+        self.runtime.context_manager.record_message({
+            "type": "tool_request",
+            "tool_name": name,
+            "arguments": args,
+        })
 
     def _on_tool_complete(self, event: AgentEvent) -> None:
         name = event.data.get("tool_name", "?")
@@ -123,6 +151,14 @@ class Repl:
             if status == "error":
                 err = event.data.get("error_msg", "unknown")
                 self.console.print(f"  [red]✗[/red] [dim]{name} 失败: {err}[/dim]")
+            # 录制 (diff 已在 _on_tool_live_output 中录制)
+            self.runtime.context_manager.record_message({
+                "type": "tool_complete",
+                "tool_name": name,
+                "status": status,
+                "had_diff": True,
+                "error_msg": event.data.get("error_msg"),
+            })
             return
 
         if status == "success":
@@ -134,11 +170,31 @@ class Repl:
         elif status == "cancelled":
             self.console.print(f"  [yellow]⊘[/yellow] [dim]{name} 已取消[/dim]")
 
+        # 录制
+        self.runtime.context_manager.record_message({
+            "type": "tool_complete",
+            "tool_name": name,
+            "status": status,
+            "result": event.data.get("result", ""),
+            "error_msg": event.data.get("error_msg"),
+        })
+
     def _on_tool_live_output(self, event: AgentEvent) -> None:
         if event.data.get("kind") == "diff":
             from cli.diff_renderer import render_diff
             self._last_tool_had_diff = True
             render_diff(self.console, event.data["diff"])
+            # 录制 diff 原始数据
+            diff_obj = event.data["diff"]
+            self.runtime.context_manager.record_message({
+                "type": "tool_diff",
+                "tool_name": event.data.get("tool_name", ""),
+                "unified_diff": diff_obj.unified_diff,
+                "added": diff_obj.added,
+                "removed": diff_obj.removed,
+                "file_path": diff_obj.file_path,
+                "is_new": diff_obj.is_new,
+            })
 
     def _on_error(self, event: AgentEvent) -> None:
         self._end_stream()
@@ -176,21 +232,6 @@ class Repl:
             self.console.print(f"\n  [red bold]Agent 执行出错:[/red bold] {e}")
 
         self._end_stream()
-
-        # 记录助手响应（从 graph state 提取最后一条 AI 消息）
-        try:
-            snapshot = self.runtime.graph.get_state(config)
-            messages = snapshot.values.get("message", [])
-            for msg in reversed(messages):
-                if hasattr(msg, "content") and getattr(msg, "type", None) == "ai":
-                    cm.record_message({
-                        "type": "assistant",
-                        "content": msg.content[:500] if msg.content else "",
-                        "model": cm.session_stats.model,
-                    })
-                    break
-        except Exception:
-            pass
 
         self.console.print()
 
@@ -349,6 +390,8 @@ class Repl:
             case "/new":
                 self.thread_id = uuid.uuid4().hex
                 self.console.print("  [dim]已开启新会话[/dim]")
+            case "/resume":
+                self._cmd_resume()
             case "/context":
                 self._cmd_context(parts[1:])
             case "/memory":
@@ -367,6 +410,7 @@ class Repl:
             ("/version, /v", "显示版本号"),
             ("/clear", "清屏"),
             ("/new", "开启新会话 (清空对话历史)"),
+            ("/resume", "浏览并恢复历史会话"),
             ("/context show", "显示当前已加载的上下文"),
             ("/context reload", "重新加载上下文文件"),
             ("/memory list", "列出所有已保存的记忆"),
@@ -459,6 +503,234 @@ class Repl:
         else:
             self.console.print(f"  [red]未知子命令:[/red] /memory {sub}")
             self.console.print("  [dim]用法: /memory list | add <fact> | remove <n>[/dim]")
+
+    # ── /resume 命令 ─────────────────────────────────────────────
+
+    def _cmd_resume(self) -> None:
+        """交互式浏览并恢复历史会话。"""
+        from langchain_core.messages import AIMessage, HumanMessage
+        from core.context import format_relative_time, format_file_size
+
+        cm = self.runtime.context_manager
+        sessions = cm.list_sessions()
+
+        if not sessions:
+            self.console.print("  [dim]暂无历史会话。[/dim]")
+            return
+
+        # 交互式选择
+        selected = self._session_picker(sessions)
+        if selected is None:
+            self.console.print("  [dim]已取消[/dim]")
+            return
+
+        filepath = selected["filepath"]
+
+        # 加载会话消息
+        records = cm.load_session(filepath)
+        if not records:
+            self.console.print("  [red]会话为空，无法恢复[/red]")
+            return
+
+        # 开启新 thread 并注入历史消息到 graph state
+        self.thread_id = uuid.uuid4().hex
+        config = {"configurable": {"thread_id": self.thread_id}}
+
+        messages = []
+        for record in records:
+            rtype = record.get("type")
+            if rtype == "user":
+                content = record.get("display", record.get("content", ""))
+                messages.append(HumanMessage(content=content))
+            elif rtype == "assistant":
+                content = record.get("content", "")
+                messages.append(AIMessage(content=content))
+
+        if not messages:
+            self.console.print("  [red]没有可恢复的消息[/red]")
+            return
+
+        # 注入到 graph state
+        try:
+            self.runtime.graph.update_state(
+                config,
+                {"message": messages},
+            )
+        except Exception as e:
+            self.console.print(f"  [red]恢复失败:[/red] {e}")
+            return
+
+        # 标记为 resume
+        cm._resumed_from = filepath
+
+        # 渲染历史消息到 CLI
+        self._render_resumed_history(records)
+
+    def _session_picker(self, sessions: list[dict]) -> dict | None:
+        """用 prompt_toolkit 实现上下键 + 回车的交互式会话选择。"""
+        from core.context import format_relative_time, format_file_size
+
+        state = {"selected": 0}
+
+        def _build_items() -> list[tuple[str, str]]:
+            """构建每个会话的 (title, subtitle) 显示文本。"""
+            items = []
+            for s in sessions:
+                title = s["first_user_message"]
+                if len(title) > 70:
+                    title = title[:67] + "..."
+
+                parts = []
+                parts.append(format_relative_time(s["timestamp"]))
+                if s.get("branch"):
+                    parts.append(s["branch"])
+                parts.append(format_file_size(s.get("file_size", 0)))
+
+                subtitle = " · ".join(parts)
+                items.append((title, subtitle))
+            return items
+
+        items = _build_items()
+
+        kb = KeyBindings()
+
+        @kb.add("up", eager=True)
+        @kb.add("k", eager=True)
+        def _(event):
+            state["selected"] = (state["selected"] - 1) % len(items)
+
+        @kb.add("down", eager=True)
+        @kb.add("j", eager=True)
+        def _(event):
+            state["selected"] = (state["selected"] + 1) % len(items)
+
+        @kb.add("enter", eager=True)
+        def _(event):
+            event.app.exit(result=state["selected"])
+
+        @kb.add("escape", eager=True)
+        @kb.add("c-c", eager=True)
+        @kb.add("q", eager=True)
+        def _(event):
+            event.app.exit(result=None)
+
+        def _render_list() -> FormattedText:
+            frags = []
+            frags.append(("bold", "  Resume a conversation\n"))
+            frags.append(("", "\n"))
+
+            for i, (title, subtitle) in enumerate(items):
+                is_sel = i == state["selected"]
+                if is_sel:
+                    frags.append(("fg:#847ACE bold", f"  > {title}\n"))
+                    frags.append(("fg:#847ACE", f"    {subtitle}\n"))
+                else:
+                    frags.append(("dim", f"    {title}\n"))
+                    frags.append(("dim", f"    {subtitle}\n"))
+
+                if i < len(items) - 1:
+                    frags.append(("", "\n"))
+
+            frags.append(("", "\n"))
+            frags.append(("dim", "  ↑↓ navigate · enter select · esc cancel"))
+            return FormattedText(frags)
+
+        layout = Layout(
+            Window(
+                content=FormattedTextControl(_render_list),
+                dont_extend_height=True,
+            )
+        )
+
+        result = Application(
+            layout=layout,
+            key_bindings=kb,
+            mouse_support=False,
+        ).run()
+
+        if result is None:
+            return None
+        return sessions[result]
+
+    def _render_resumed_history(self, records: list[dict]) -> None:
+        """渲染恢复的历史消息，与实时渲染视觉一致。"""
+        from cli.diff_renderer import render_diff
+        from core.utils.diff import DiffResult
+
+        self.console.print()
+        self.console.print("  [dim]─── 恢复的会话历史 ───[/dim]")
+
+        for record in records:
+            rtype = record.get("type")
+
+            if rtype == "user":
+                content = record.get("display", record.get("content", ""))
+                line = Text(no_wrap=True)
+                line.append(
+                    _ljust_cols(f"{PROMPT_SYMBOL} {content}", self.console.width),
+                    style=_BG_USER,
+                )
+                self.console.print(line)
+
+            elif rtype == "thought":
+                text = record.get("text", "")
+                if text:
+                    self.console.print(f"  [dim italic]{text}[/dim italic]", highlight=False)
+
+            elif rtype == "assistant":
+                content = record.get("content", "")
+                if content:
+                    self.console.print()
+                    self.console.print(content, highlight=False, markup=False)
+                    self.console.print()
+
+            elif rtype == "tool_request":
+                name = record.get("tool_name", "?")
+                args = record.get("arguments", {})
+                display = _TOOL_DISPLAY.get(name, name)
+                file_path = args.get("file_path")
+
+                if file_path:
+                    self.console.print(f"\n  [bold cyan]⏺ {display}[/bold cyan]({file_path})")
+                else:
+                    args_brief = ", ".join(f"{k}={_truncate(v)}" for k, v in args.items())
+                    self.console.print(
+                        f"\n  [bold cyan]⏺ {display}[/bold cyan]"
+                        f"[dim]({args_brief})[/dim]"
+                    )
+
+            elif rtype == "tool_diff":
+                diff = DiffResult(
+                    file_path=record.get("file_path", ""),
+                    unified_diff=record.get("unified_diff", ""),
+                    added=record.get("added", 0),
+                    removed=record.get("removed", 0),
+                    is_new=record.get("is_new", False),
+                )
+                render_diff(self.console, diff)
+
+            elif rtype == "tool_complete":
+                name = record.get("tool_name", "?")
+                status = record.get("status", "")
+                had_diff = record.get("had_diff", False)
+
+                if had_diff:
+                    if status == "error":
+                        err = record.get("error_msg", "unknown")
+                        self.console.print(f"  [red]✗[/red] [dim]{name} 失败: {err}[/dim]")
+                    # diff 已在 tool_diff 中渲染，success 时不需要再输出
+                elif status == "success":
+                    result_preview = _truncate(record.get("result", ""), 120)
+                    self.console.print(f"  [green]✓[/green] [dim]{name} → {result_preview}[/dim]")
+                elif status == "error":
+                    err = record.get("error_msg", "unknown")
+                    self.console.print(f"  [red]✗[/red] [dim]{name} 失败: {err}[/dim]")
+                elif status == "cancelled":
+                    self.console.print(f"  [yellow]⊘[/yellow] [dim]{name} 已取消[/dim]")
+
+        self.console.print()
+        self.console.print("  [dim]─── 继续对话 ───[/dim]")
+        self.console.print()
 
     # ── 渲染 ─────────────────────────────────────────────────────
 
