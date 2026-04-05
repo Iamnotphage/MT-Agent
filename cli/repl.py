@@ -19,6 +19,7 @@ from prompt_toolkit.history import InMemoryHistory
 from cli.commands.context import cmd_context
 from cli.commands.memory import cmd_memory
 from cli.commands.resume import cmd_resume
+from config.settings import CONTEXT as CONTEXT_CONFIG
 from cli.event_handlers.stream import StreamHandler
 from cli.ui.input import read_input
 from cli.utils.text import (
@@ -42,6 +43,7 @@ class Repl:
         self.runtime = runtime
         self.thread_id = uuid.uuid4().hex
         self._history = InMemoryHistory()
+        self._token_limit = CONTEXT_CONFIG.get("token_limit", 65536)
 
         # 事件处理（渲染 + 录制）
         self._stream = StreamHandler(
@@ -55,7 +57,7 @@ class Repl:
     def run(self) -> None:
         while True:
             try:
-                user_input = read_input(self._history)
+                user_input = read_input(self._history, status_func=self._context_status)
             except EOFError:
                 self._on_exit()
                 break
@@ -287,6 +289,16 @@ class Repl:
                 f"    [{PROMPT_STYLE}]{name:<24}[/{PROMPT_STYLE}] [dim]{desc}[/dim]"
             )
         self.console.print()
+
+    # ── 上下文状态 ─────────────────────────────────────────────
+
+    def _context_status(self) -> str:
+        """返回上下文占比文本，如 '42%' 或空字符串。"""
+        last = self.runtime.session.stats.last_input_tokens
+        if last <= 0:
+            return ""
+        pct = min(last / self._token_limit * 100, 100)
+        return f"{pct:.0f}%"
 
     # ── 渲染辅助 ─────────────────────────────────────────────────
 

@@ -39,7 +39,6 @@ def config(tmp_global_dir):
         "global_dir": str(tmp_global_dir),
         "compression_threshold": 0.50,
         "compression_preserve_ratio": 0.30,
-        "context_budget_tokens": 2000,
         "token_limit": 65536,
     }
 

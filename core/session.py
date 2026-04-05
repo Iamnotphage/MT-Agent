@@ -74,6 +74,7 @@ class SessionStats:
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     total_tokens: int = 0
+    last_input_tokens: int = 0  # 最近一次 LLM 调用的 input tokens（即上下文占用）
 
     # 轮次统计
     turn_count: int = 0
@@ -94,6 +95,7 @@ class SessionStats:
         self.total_input_tokens += input_tokens
         self.total_output_tokens += output_tokens
         self.total_tokens += input_tokens + output_tokens
+        self.last_input_tokens = input_tokens
         self.turn_count += 1
         if model:
             self.model = model

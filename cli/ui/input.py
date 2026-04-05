@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from prompt_toolkit import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.cursor_shapes import CursorShape
@@ -12,13 +14,16 @@ from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.key_binding.bindings.emacs import load_emacs_bindings
 from prompt_toolkit.layout import Layout
-from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
+from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 
 from cli.utils.text import COMMANDS, PROMPT_SYMBOL
 
 
-def read_input(history: InMemoryHistory) -> str:
+def read_input(
+    history: InMemoryHistory,
+    status_func: Callable[[], str] | None = None,
+) -> str:
     """构建 prompt_toolkit Application，实现命令下拉菜单。"""
     dropdown: dict = {"items": [], "selected": 0}
 
@@ -95,14 +100,39 @@ def read_input(history: InMemoryHistory) -> str:
         if not buf.text:
             event.app.exit(exception=EOFError())
 
+    # ── 状态栏（右侧显示上下文占比等信息）────────────────────
+    def _render_status() -> FormattedText:
+        if status_func is None:
+            return FormattedText([])
+        text = status_func()
+        if not text:
+            return FormattedText([])
+        return FormattedText([("fg:#847ACE", text)])
+
+    _has_status = Condition(lambda: status_func is not None)
+
+    # 输入行: 左侧输入框 + 右侧状态
+    input_row = VSplit([
+        Window(
+            content=BufferControl(buffer=buf),
+            get_line_prefix=lambda lineno, wc: _pfx if lineno == 0 and wc == 0 else _pfx_wrap,
+            dont_extend_height=True,
+            wrap_lines=True,
+        ),
+        ConditionalContainer(
+            Window(
+                content=FormattedTextControl(_render_status),
+                dont_extend_height=True,
+                width=12,
+                align=1,  # right align
+            ),
+            filter=_has_status,
+        ),
+    ])
+
     layout = Layout(
         HSplit([
-            Window(
-                content=BufferControl(buffer=buf),
-                get_line_prefix=lambda lineno, wc: _pfx if lineno == 0 and wc == 0 else _pfx_wrap,
-                dont_extend_height=True,
-                wrap_lines=True,
-            ),
+            input_row,
             ConditionalContainer(
                 Window(
                     content=FormattedTextControl(_render_dropdown),
