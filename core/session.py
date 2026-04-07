@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from core.compressor import ContextCompressor
 from core.utils.tokens import estimate_tokens
@@ -141,7 +141,14 @@ class SessionStats:
 # ---------------------------------------------------------------------------
 
 # 可渲染的记录类型（load_session 时过滤用）
-_RENDERABLE_TYPES = {"user", "assistant", "thought", "tool_request", "tool_complete", "tool_diff", "tool_call"}
+_RENDERABLE_TYPES = {
+    "thought",
+    "tool_request",
+    "tool_complete",
+    "tool_diff",
+    "tool_call",
+    "transcript_message",
+}
 
 
 class SessionRecorder:
@@ -293,15 +300,9 @@ class SessionRecorder:
             resumed.append(ContextCompressor.build_summary_message(summary_text))
 
         start_idx = last_compression_idx + 1 if last_compression_idx >= 0 else 0
-        for record in records[start_idx:]:
-            rtype = record.get("type")
-            if rtype == "user":
-                content = record.get("display", record.get("content", ""))
-                resumed.append(HumanMessage(content=content))
-            elif rtype == "assistant":
-                content = record.get("content", "")
-                resumed.append(AIMessage(content=content))
-
+        tail_records = records[start_idx:]
+        transcript_records = [r for r in tail_records if r.get("type") == "transcript_message"]
+        resumed.extend(self._build_messages_from_transcript(transcript_records))
         return resumed
 
     def estimate_messages_tokens(self, messages: list[BaseMessage]) -> int:
@@ -315,6 +316,31 @@ class SessionRecorder:
             total += estimate_tokens(f"[{role}] {content}")
         return total
 
+    @staticmethod
+    def _build_messages_from_transcript(records: list[dict]) -> list[BaseMessage]:
+        """从 canonical transcript 记录重建 LangChain 消息。"""
+        messages: list[BaseMessage] = []
+        for record in records:
+            role = record.get("role")
+            content = record.get("content", "")
+            if role == "user":
+                messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                messages.append(AIMessage(
+                    content=content,
+                    tool_calls=record.get("tool_calls") or [],
+                ))
+            elif role == "tool":
+                kwargs: dict[str, Any] = {
+                    "content": content,
+                    "tool_call_id": record.get("tool_call_id", ""),
+                }
+                name = record.get("name")
+                if name:
+                    kwargs["name"] = name
+                messages.append(ToolMessage(**kwargs))
+        return messages
+
     # ------------------------------------------------------------------
     # 内部实现
     # ------------------------------------------------------------------
@@ -326,8 +352,7 @@ class SessionRecorder:
         model = ""
         branch = ""
         timestamp = 0
-        first_user_msg = ""
-        message_count = 0
+        records: list[dict[str, Any]] = []
 
         for line in filepath.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -344,13 +369,18 @@ class SessionRecorder:
                 model = record.get("model", "")
                 branch = record.get("branch", "")
                 timestamp = record.get("timestamp", 0)
-            elif rtype == "user":
+            else:
+                records.append(record)
+
+        transcript_records = [r for r in records if r.get("type") == "transcript_message"]
+        first_user_msg = ""
+        message_count = 0
+        for record in transcript_records:
+            role = record.get("role")
+            if role in {"user", "assistant"}:
                 message_count += 1
-                if not first_user_msg:
-                    display = record.get("display", record.get("content", ""))
-                    first_user_msg = display[:80]
-            elif rtype == "assistant":
-                message_count += 1
+            if role == "user" and not first_user_msg:
+                first_user_msg = str(record.get("content", ""))[:80]
 
         if not first_user_msg:
             return None

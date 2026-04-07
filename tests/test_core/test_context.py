@@ -305,8 +305,8 @@ def recorder(tmp_workspace, config):
 class TestSessionHistory:
     def test_record_and_flush(self, recorder):
         """记录消息并 flush 到磁盘。"""
-        recorder.record({"type": "user", "display": "hello"})
-        recorder.record({"type": "assistant", "content": "hi"})
+        recorder.record({"type": "transcript_message", "role": "user", "content": "hello"})
+        recorder.record({"type": "transcript_message", "role": "assistant", "content": "hi"})
 
         filepath = recorder.flush()
         assert filepath is not None
@@ -330,7 +330,7 @@ class TestSessionHistory:
 
     def test_records_have_timestamp(self, recorder):
         """自动添加 timestamp。"""
-        recorder.record({"type": "user", "display": "test"})
+        recorder.record({"type": "transcript_message", "role": "user", "content": "test"})
         assert "timestamp" in recorder._records[0]
 
 
@@ -432,8 +432,8 @@ class TestSessionListAndLoad:
 
     def test_list_sessions_after_flush(self, recorder):
         """flush 后能列出该会话。"""
-        recorder.record({"type": "user", "display": "hello"})
-        recorder.record({"type": "assistant", "content": "hi there"})
+        recorder.record({"type": "transcript_message", "role": "user", "content": "hello"})
+        recorder.record({"type": "transcript_message", "role": "assistant", "content": "hi there"})
         recorder.flush()
 
         sessions = recorder.list_sessions()
@@ -447,14 +447,14 @@ class TestSessionListAndLoad:
         tmp_workspace.mkdir(parents=True, exist_ok=True)
 
         r1 = SessionRecorder(working_directory=str(tmp_workspace), config=config)
-        r1.record({"type": "user", "display": "first session"})
+        r1.record({"type": "transcript_message", "role": "user", "content": "first session"})
         r1.flush()
 
         import time as _time
         _time.sleep(0.05)
 
         r2 = SessionRecorder(working_directory=str(tmp_workspace), config=config)
-        r2.record({"type": "user", "display": "second session"})
+        r2.record({"type": "transcript_message", "role": "user", "content": "second session"})
         r2.flush()
 
         sessions = r2.list_sessions()
@@ -464,20 +464,20 @@ class TestSessionListAndLoad:
 
     def test_load_session(self, recorder):
         """加载会话返回正确的消息记录。"""
-        recorder.record({"type": "user", "display": "what is 1+1"})
-        recorder.record({"type": "assistant", "content": "2"})
+        recorder.record({"type": "transcript_message", "role": "user", "content": "what is 1+1"})
+        recorder.record({"type": "transcript_message", "role": "assistant", "content": "2"})
         recorder.record({"type": "tool_call", "toolName": "calc", "status": "success"})
         filepath = recorder.flush()
 
         records = recorder.load_session(filepath)
         assert len(records) == 3
-        assert records[0]["type"] == "user"
-        assert records[1]["type"] == "assistant"
+        assert records[0]["type"] == "transcript_message"
+        assert records[1]["type"] == "transcript_message"
         assert records[2]["type"] == "tool_call"
 
     def test_load_session_skips_metadata(self, recorder):
         """加载时跳过 session_start 和 session_end 记录。"""
-        recorder.record({"type": "user", "display": "hi"})
+        recorder.record({"type": "transcript_message", "role": "user", "content": "hi"})
         filepath = recorder.flush()
 
         records = recorder.load_session(filepath)
@@ -487,7 +487,7 @@ class TestSessionListAndLoad:
 
     def test_list_sessions_skips_empty(self, recorder):
         """没有用户消息的会话不出现在列表中。"""
-        recorder.record({"type": "assistant", "content": "hello"})
+        recorder.record({"type": "transcript_message", "role": "assistant", "content": "hello"})
         recorder.flush()
 
         sessions = recorder.list_sessions()
@@ -499,16 +499,16 @@ class TestSessionListAndLoad:
 
         # 第一次会话: [A, B]
         r1 = SessionRecorder(working_directory=str(tmp_workspace), config=config)
-        r1.record({"type": "user", "display": "A"})
-        r1.record({"type": "assistant", "content": "B"})
+        r1.record({"type": "transcript_message", "role": "user", "content": "A"})
+        r1.record({"type": "transcript_message", "role": "assistant", "content": "B"})
         old_path = r1.flush()
         assert old_path.exists()
 
         # 第二次会话: resume 后新增 [C, D]
         r2 = SessionRecorder(working_directory=str(tmp_workspace), config=config)
         r2._resumed_from = old_path
-        r2.record({"type": "user", "display": "C"})
-        r2.record({"type": "assistant", "content": "D"})
+        r2.record({"type": "transcript_message", "role": "user", "content": "C"})
+        r2.record({"type": "transcript_message", "role": "assistant", "content": "D"})
 
         import time as _time
         _time.sleep(0.05)
@@ -519,7 +519,7 @@ class TestSessionListAndLoad:
 
         records = r2.load_session(new_path)
         assert len(records) == 4
-        displays = [r.get("display", r.get("content")) for r in records]
+        displays = [r.get("content") for r in records]
         assert displays == ["A", "B", "C", "D"]
 
         sessions = r2.list_sessions()
@@ -527,14 +527,14 @@ class TestSessionListAndLoad:
 
     def test_build_resume_messages_uses_last_compression_snapshot(self, recorder):
         """resume 只恢复最后一条 compression 摘要及其后的消息。"""
-        recorder.record({"type": "user", "display": "A"})
-        recorder.record({"type": "assistant", "content": "B"})
+        recorder.record({"type": "transcript_message", "role": "user", "content": "A"})
+        recorder.record({"type": "transcript_message", "role": "assistant", "content": "B"})
         recorder.record({"type": "compression", "summary": "S1"})
-        recorder.record({"type": "user", "display": "C"})
-        recorder.record({"type": "assistant", "content": "D"})
+        recorder.record({"type": "transcript_message", "role": "user", "content": "C"})
+        recorder.record({"type": "transcript_message", "role": "assistant", "content": "D"})
         recorder.record({"type": "compression", "summary": "S2"})
-        recorder.record({"type": "user", "display": "E"})
-        recorder.record({"type": "assistant", "content": "F"})
+        recorder.record({"type": "transcript_message", "role": "user", "content": "E"})
+        recorder.record({"type": "transcript_message", "role": "assistant", "content": "F"})
         filepath = recorder.flush()
 
         messages = recorder.build_resume_messages(filepath)
@@ -544,6 +544,41 @@ class TestSessionListAndLoad:
         assert "S2" in messages[0].content
         assert messages[1].content == "E"
         assert messages[2].content == "F"
+
+    def test_build_resume_messages_prefers_canonical_transcript(self, recorder):
+        """若存在 canonical transcript，应恢复 assistant tool_calls 和 ToolMessage。"""
+        recorder.record({
+            "type": "transcript_message",
+            "role": "user",
+            "content": "read file",
+        })
+        recorder.record({
+            "type": "transcript_message",
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "name": "read_file",
+                "args": {"path": "a.py"},
+                "id": "call_1",
+                "type": "tool_call",
+            }],
+        })
+        recorder.record({
+            "type": "transcript_message",
+            "role": "tool",
+            "content": "file content",
+            "tool_call_id": "call_1",
+            "name": "read_file",
+        })
+        filepath = recorder.flush()
+
+        messages = recorder.build_resume_messages(filepath)
+
+        assert len(messages) == 3
+        assert messages[0].content == "read file"
+        assert messages[1].tool_calls[0]["name"] == "read_file"
+        assert messages[2].tool_call_id == "call_1"
+        assert messages[2].content == "file content"
 
     def test_estimate_messages_tokens_returns_positive_value(self, recorder):
         """估算 resume 消息 token 数，用于初始 context 占比。"""

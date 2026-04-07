@@ -149,26 +149,31 @@ def _render_resumed_history(console: Console, records: list[dict]) -> None:
     for record in records:
         rtype = record.get("type")
 
-        if rtype == "user":
-            content = record.get("display", record.get("content", ""))
-            line = Text(no_wrap=True)
-            line.append(
-                ljust_cols(f"{PROMPT_SYMBOL} {content}", console.width),
-                style=BG_USER,
-            )
-            console.print(line)
+        if rtype == "transcript_message":
+            role = record.get("role")
+            if role == "user":
+                content = record.get("content", "")
+                line = Text(no_wrap=True)
+                line.append(
+                    ljust_cols(f"{PROMPT_SYMBOL} {content}", console.width),
+                    style=BG_USER,
+                )
+                console.print(line)
+            elif role == "assistant":
+                content = record.get("content", "")
+                if content:
+                    console.print()
+                    console.print(content, highlight=False, markup=False)
+                    console.print()
+            elif role == "tool":
+                name = record.get("name", "?")
+                content = truncate(record.get("content", ""), 120)
+                console.print(f"  [green]✓[/green] [dim]{name} → {content}[/dim]")
 
         elif rtype == "thought":
             text = record.get("text", "")
             if text:
                 console.print(f"  [dim italic]{text}[/dim italic]", highlight=False)
-
-        elif rtype == "assistant":
-            content = record.get("content", "")
-            if content:
-                console.print()
-                console.print(content, highlight=False, markup=False)
-                console.print()
 
         elif rtype == "tool_request":
             name = record.get("tool_name", "?")

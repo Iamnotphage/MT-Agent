@@ -86,7 +86,11 @@ class Repl:
 
         session = self.runtime.session
         session.stats.prompt_count += 1
-        session.record({"type": "user", "display": user_input})
+        session.record({
+            "type": "transcript_message",
+            "role": "user",
+            "content": user_input,
+        })
 
         config = {"configurable": {"thread_id": self.thread_id}}
         state_input: dict | Command = {

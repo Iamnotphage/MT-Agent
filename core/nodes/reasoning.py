@@ -101,6 +101,15 @@ def create_reasoning_node(
             content=collected.content or "",
             tool_calls=collected.tool_calls or [],
         )
+        event_bus.emit(AgentEvent(
+            type=EventType.TRANSCRIPT_MESSAGE,
+            data={
+                "role": "assistant",
+                "content": ai_message.content,
+                "tool_calls": ai_message.tool_calls or [],
+            },
+            turn=turn,
+        ))
 
         # 6) tool_calls → pending_tool_calls
         pending = _extract_tool_calls(collected, event_bus, turn)

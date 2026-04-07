@@ -36,6 +36,7 @@ class StreamHandler:
         event_bus.subscribe(EventType.TOOL_LIVE_OUTPUT, self.on_tool_live_output)
         event_bus.subscribe(EventType.CONTEXT_COMPRESSED, self.on_context_compressed)
         event_bus.subscribe(EventType.ERROR, self.on_error)
+        event_bus.subscribe(EventType.TRANSCRIPT_MESSAGE, self.on_transcript_message)
 
     # ── 流式控制 ─────────────────────────────────────────────────
 
@@ -51,11 +52,6 @@ class StreamHandler:
             })
             self._thought_buf.clear()
         if self._content_buf:
-            self._session.record({
-                "type": "assistant",
-                "content": "".join(self._content_buf),
-                "model": self._session.stats.model,
-            })
             self._content_buf.clear()
 
     # ── 事件处理 ─────────────────────────────────────────────────
@@ -171,3 +167,10 @@ class StreamHandler:
             f"\n  [bold yellow]⚡ 上下文已压缩[/bold yellow] "
             f"[dim]({removed} 条消息摘要化, 保留 {kept} 条)[/dim]"
         )
+
+    def on_transcript_message(self, event: AgentEvent) -> None:
+        record = dict(event.data or {})
+        if not record:
+            return
+        record["type"] = "transcript_message"
+        self._session.record(record)

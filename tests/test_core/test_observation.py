@@ -159,6 +159,25 @@ class TestObservationNode:
         assert received[0].data["tool_count"] == 1
         assert received[0].data["should_continue"] is True
 
+    def test_tool_transcript_event(self, event_bus):
+        """observation 会发送 canonical tool transcript。"""
+        received = []
+        event_bus.subscribe(EventType.TRANSCRIPT_MESSAGE, lambda e: received.append(e))
+
+        node = create_observation_node(event_bus)
+        state = {
+            "completed_tool_calls": [_make_tc(result="hello world")],
+            "turn_count": 1,
+            "max_turns": 25,
+        }
+
+        node(state)
+
+        assert len(received) == 1
+        assert received[0].data["role"] == "tool"
+        assert received[0].data["tool_call_id"] == "call_1"
+        assert received[0].data["content"] == "hello world"
+
     def test_empty_completed(self, event_bus):
         """空 completed_tool_calls → 无 ToolMessage"""
         node = create_observation_node(event_bus)

@@ -88,6 +88,19 @@ class TestReasoningNode:
         assert len(received) == 1
         assert received[0].data["turn"] == 1
 
+    def test_assistant_transcript_event_emitted(self, event_bus, mock_llm_tool_call):
+        """reasoning 完成后发送 canonical assistant transcript。"""
+        received = []
+        event_bus.subscribe(EventType.TRANSCRIPT_MESSAGE, lambda e: received.append(e))
+
+        node = create_reasoning_node(mock_llm_tool_call, event_bus)
+        state = {"message": [HumanMessage(content="hi")], "turn_count": 0}
+        node(state)
+
+        assert len(received) == 1
+        assert received[0].data["role"] == "assistant"
+        assert received[0].data["tool_calls"][0]["name"] == "read_file"
+
     def test_llm_error_raises(self, event_bus):
         """LLM 调用失败 → 抛异常，不写入假消息"""
         llm = MagicMock()
