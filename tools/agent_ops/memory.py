@@ -16,7 +16,9 @@ from tools.base import BaseTool, ToolResult, ToolRiskLevel
 
 
 class SaveMemoryArgs(BaseModel):
-    fact: str = Field(description="要记住的事实或知识，用自然语言描述")
+    fact: str = Field(
+        description="A clear, self-contained statement in natural language.",
+    )
 
 
 class SaveMemoryTool(BaseTool):
@@ -24,8 +26,9 @@ class SaveMemoryTool(BaseTool):
 
     name = "save_memory"
     description = (
-        "将重要事实保存到持久记忆中，跨会话可用。"
-        "当用户说 '记住...'、'以后注意...' 或你发现了值得记录的项目知识时调用此工具。"
+        "Save an important fact to persistent memory so it can be reused across sessions. "
+        "Use this when the user explicitly asks you to remember something, or when you "
+        "discover stable project knowledge that will likely be useful later."
     )
     risk_level = ToolRiskLevel.LOW
     args_schema = SaveMemoryArgs
