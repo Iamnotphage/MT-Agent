@@ -169,3 +169,23 @@ def test_cmd_resume_allows_reapproval_when_interrupt_present(monkeypatch, tmp_pa
     thread_id = resume_mod.cmd_resume(console, recorder, graph)
 
     assert thread_id == "thread-restore"
+
+
+def test_cmd_resume_warns_when_checkpoint_and_transcript_diverge(monkeypatch, tmp_path):
+    recorder, filepath = _make_recorder(tmp_path)
+    console = Console(record=True, width=100)
+    graph = _FakeGraph(SimpleNamespace(
+        values={
+            "message": recorder.build_resume_messages(filepath) + recorder.build_resume_messages(filepath),
+        },
+        next=(),
+        tasks=(),
+    ))
+
+    monkeypatch.setattr(resume_mod, "_session_picker", lambda sessions: sessions[0])
+    monkeypatch.setattr(resume_mod, "_render_resumed_history", lambda console, records: None)
+
+    thread_id = resume_mod.cmd_resume(console, recorder, graph)
+
+    assert thread_id == "thread-restore"
+    assert "历史长度不一致" in console.export_text()

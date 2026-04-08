@@ -57,6 +57,7 @@ def cmd_resume(
         return None
 
     config = {"configurable": {"thread_id": thread_id}}
+    interrupt_requests: list[dict] = []
     restored_from_checkpoint = False
     try:
         snapshot = graph.get_state(config)
@@ -85,6 +86,13 @@ def cmd_resume(
         return None
 
     session._resumed_from = filepath
+
+    for notice in _build_resume_consistency_notices(
+        snapshot=snapshot,
+        transcript_messages=messages,
+        render_records=records,
+    ):
+        console.print(f"  [dim]{notice}[/dim]")
 
     # 渲染历史
     _render_resumed_history(console, session.load_raw_session(filepath))
@@ -121,6 +129,30 @@ def _extract_interrupt_requests(snapshot: Any) -> list[dict]:
             elif isinstance(value, dict):
                 requests.append(value)
     return requests
+
+
+def _build_resume_consistency_notices(
+    *,
+    snapshot: Any,
+    transcript_messages: list,
+    render_records: list[dict],
+) -> list[str]:
+    """构建 checkpoint / transcript 一致性提示。"""
+    notices: list[str] = []
+    snapshot_values = getattr(snapshot, "values", None) or {}
+    checkpoint_messages = snapshot_values.get("message") or []
+
+    if checkpoint_messages and not transcript_messages:
+        notices.append("恢复以 checkpoint 为准；本地 transcript 缺失，历史展示可能不完整。")
+    elif transcript_messages and not checkpoint_messages:
+        notices.append("checkpoint 中未找到消息历史，已回退使用 transcript 估算上下文。")
+    elif checkpoint_messages and transcript_messages and len(checkpoint_messages) != len(transcript_messages):
+        notices.append("checkpoint 与 transcript 历史长度不一致；执行恢复以 checkpoint 为准。")
+
+    if not render_records:
+        notices.append("当前 session 缺少可渲染历史记录；仅恢复执行状态。")
+
+    return notices
 
 
 def _recover_interrupted_tool_execution(

@@ -151,6 +151,50 @@ resume 时会：
 
 用于后续回放和审计。
 
+### 审批恢复边界
+
+当前审批恢复的边界规则如下：
+
+1. 工具处于 `awaiting_approval`，但你还没有做出确认，CLI 中断退出
+   - 恢复后必须重新确认
+   - 原因是旧审批动作并未真正完成
+
+2. 你已经输入 `y` / `n`，但在工具真正执行完成前 CLI 中断退出
+   - 若图状态已经离开 `awaiting_approval`，则不会再重新审批
+   - 若随后停在 `tool_execution`，恢复时会按 P3-2 收敛为 `interrupted`
+   - 不会自动重跑工具
+
+3. 工具已经执行成功，之后 CLI 中断退出
+   - 恢复后不会重新审批，也不会重新执行
+
+因此，“是否重新确认”取决于恢复时 checkpoint 中的真实状态，而不是取决于用户主观记忆里“之前是不是差不多已经点过确认”。
+
+当前系统采用的原则是：
+
+- 仍处于 `awaiting_approval` → 重新确认
+- 已进入 `tool_execution` 但未完成 → 标记 `interrupted`
+- 已完成 → 不重放
+
+## Phase 4: 一致性检查
+
+当前已完成的 P3-4 为 checkpoint / transcript / compression 一致性规则收口。
+
+当前优先级如下：
+
+1. execution resume 以 checkpoint 为准
+2. transcript 用于历史展示、压缩摘要恢复、fallback token 估算
+3. compression 只影响 transcript/history，不覆盖 checkpoint 的执行语义
+
+当前已实现的检查包括：
+
+- session 缺少 `threadId` → 拒绝 execution resume
+- 找不到持久化 checkpoint → 拒绝 execution resume
+- 存在 `awaiting_approval`，但没有可恢复的审批请求 → 拒绝 execution resume
+- checkpoint 与 transcript 历史长度不一致 → 允许恢复，但明确提示“以 checkpoint 为准”
+- checkpoint 有状态但 transcript 不完整 → 允许恢复，但提示历史展示可能不完整
+
+这一步的目的不是阻止恢复，而是让系统在不一致场景下做出明确、可解释的选择。
+
 ## Phase 2: 持久化 Checkpoint
 
 当前已接入 LangGraph 的 SQLite checkpointer，用于恢复 graph execution state。
