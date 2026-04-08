@@ -11,12 +11,22 @@ class _FakeGraph:
     def __init__(self, snapshot):
         self._snapshot = snapshot
         self.update_called = False
+        self.update_args = None
 
     def get_state(self, config):
         return self._snapshot
 
-    def update_state(self, config, values):
+    def update_state(self, config, values, as_node=None, task_id=None):
         self.update_called = True
+        self.update_args = {
+            "config": config,
+            "values": values,
+            "as_node": as_node,
+            "task_id": task_id,
+        }
+        merged = dict(getattr(self._snapshot, "values", {}) or {})
+        merged.update(values or {})
+        self._snapshot = SimpleNamespace(values=merged, next=())
 
 
 def _make_recorder(tmp_path: Path) -> tuple[SessionRecorder, Path]:
@@ -67,3 +77,34 @@ def test_cmd_resume_requires_persisted_checkpoint(monkeypatch, tmp_path):
     thread_id = resume_mod.cmd_resume(console, recorder, graph)
 
     assert thread_id is None
+
+
+def test_cmd_resume_marks_interrupted_tool_execution(monkeypatch, tmp_path):
+    recorder, filepath = _make_recorder(tmp_path)
+    console = Console(record=True, width=100)
+    graph = _FakeGraph(SimpleNamespace(
+        values={
+            "message": recorder.build_resume_messages(filepath),
+            "pending_tool_calls": [{
+                "call_id": "call_1",
+                "tool_name": "read_file",
+                "arguments": {"path": "a.py"},
+                "status": "pending",
+                "result": None,
+                "error_msg": None,
+            }],
+        },
+        next=("tool_execution",),
+    ))
+
+    monkeypatch.setattr(resume_mod, "_session_picker", lambda sessions: sessions[0])
+    monkeypatch.setattr(resume_mod, "_render_resumed_history", lambda console, records: None)
+
+    thread_id = resume_mod.cmd_resume(console, recorder, graph)
+
+    assert thread_id == "thread-restore"
+    assert graph.update_called is True
+    assert graph.update_args["as_node"] == "observation"
+    assert graph.update_args["values"]["pending_tool_calls"] == []
+    assert graph.update_args["values"]["should_continue"] is False
+    assert len(graph.update_args["values"]["message"]) == 1

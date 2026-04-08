@@ -10,6 +10,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from langchain_core.messages import ToolMessage
 from rich.console import Console
 from rich.text import Text
 
@@ -61,6 +62,14 @@ def cmd_resume(
         snapshot = graph.get_state(config)
         snapshot_values = getattr(snapshot, "values", None) or {}
         if snapshot_values:
+            if _is_pending_tool_execution(snapshot):
+                snapshot = _recover_interrupted_tool_execution(
+                    console=console,
+                    graph=graph,
+                    config=config,
+                    snapshot=snapshot,
+                )
+                snapshot_values = getattr(snapshot, "values", None) or {}
             restored_from_checkpoint = True
             restored_messages = snapshot_values.get("message") or messages
             session.stats.last_input_tokens = session.estimate_messages_tokens(restored_messages)
@@ -81,6 +90,60 @@ def cmd_resume(
         console.print()
 
     return thread_id
+
+
+def _is_pending_tool_execution(snapshot: Any) -> bool:
+    """判断 checkpoint 是否停在未完成的 tool_execution。"""
+    next_nodes = getattr(snapshot, "next", ()) or ()
+    return "tool_execution" in next_nodes
+
+
+def _recover_interrupted_tool_execution(
+    *,
+    console: Console,
+    graph: Any,
+    config: dict,
+    snapshot: Any,
+) -> Any:
+    """将未完成的 tool_execution 安全收敛为 interrupted，避免恢复后误重跑。"""
+    values = getattr(snapshot, "values", None) or {}
+    pending_calls = list(values.get("pending_tool_calls") or [])
+    interrupted_calls = []
+    for tc in pending_calls:
+        if tc.get("status") in {"pending", "executing"}:
+            interrupted_calls.append({
+                **tc,
+                "status": "interrupted",
+                "error_msg": "session interrupted before tool execution completed",
+            })
+
+    if not interrupted_calls:
+        return snapshot
+
+    interrupted_messages = [
+        ToolMessage(
+            content="[工具执行中断，等待恢复策略处理]",
+            tool_call_id=tc["call_id"],
+            name=tc["tool_name"],
+        )
+        for tc in interrupted_calls
+    ]
+
+    graph.update_state(
+        config,
+        {
+            "message": interrupted_messages,
+            "pending_tool_calls": [],
+            "completed_tool_calls": [],
+            "should_continue": False,
+        },
+        as_node="observation",
+    )
+    console.print(
+        f"  [yellow]检测到 {len(interrupted_calls)} 个未完成工具执行，"
+        "已标记为 interrupted，恢复后不会自动重跑。[/yellow]"
+    )
+    return graph.get_state(config)
 
 
 # ── 交互式会话选择器 ─────────────────────────────────────────────

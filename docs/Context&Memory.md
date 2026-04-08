@@ -127,6 +127,16 @@ resume 时会：
 
 当前已完成的 P3-1 为工具调用状态机正式引入 `interrupted`，用于表达“工具执行过程中被打断，结果不可信，等待恢复策略决定后续动作”。
 
+当前已完成的 P3-2 为工具执行中断恢复的最小安全策略：
+
+- 若 checkpoint 恢复时发现 graph 停在 `tool_execution`
+- 且存在尚未完成的 `pending_tool_calls`
+- 系统不会自动重跑工具
+- 而是将这些工具调用收敛为 `interrupted`
+- 并写入中断提示消息后结束该未完成执行链
+
+这样可以避免 resume 后误重复执行工具。
+
 ## Phase 2: 持久化 Checkpoint
 
 当前已接入 LangGraph 的 SQLite checkpointer，用于恢复 graph execution state。

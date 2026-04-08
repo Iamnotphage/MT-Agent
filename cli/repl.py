@@ -115,6 +115,8 @@ class Repl:
         """处理已存在的 interrupt，直到图继续运行完成。"""
         while self._has_pending_interrupt(config):
             requests = self._get_interrupt_requests(config)
+            if not requests:
+                break
             decisions = self._prompt_approval(requests)
             self.runtime.graph.invoke(Command(resume=decisions), config)
 
