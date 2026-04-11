@@ -35,7 +35,7 @@ export default function HomePage() {
                 Browse Articles
               </Link>
               <a
-                href="https://github.com/Iamnotphage/MT-AutoOptimize"
+                href="https://github.com/Iamnotphage/MT-Agent"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="rounded-full border border-neutral-300 px-5 py-2.5 text-sm font-semibold text-neutral-700 transition hover:border-neutral-400 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-200 dark:hover:border-neutral-600 dark:hover:bg-neutral-900"

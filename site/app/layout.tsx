@@ -17,8 +17,8 @@ const geistMono = Geist_Mono({
 })
 
 export const metadata: Metadata = {
-  title: 'MT-AutoOptimize Wiki',
-  description: 'MT-AutoOptimize project wiki built with Next.js and Velite.',
+  title: 'MT-Agent Wiki',
+  description: 'MT-Agent project wiki built with Next.js and Velite.',
 }
 
 export default function RootLayout({

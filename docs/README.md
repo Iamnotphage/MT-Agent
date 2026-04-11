@@ -1,4 +1,4 @@
-# MT-AutoOptimize
+# MT-Agent
 
 Coding Agent for MT-3000
 

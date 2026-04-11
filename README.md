@@ -1,4 +1,4 @@
-# MT-AutoOptimize
+# MT-Agent
 
 ![banner](docs/imgs/banner.png)
 
@@ -32,7 +32,7 @@ MODEL_NAME=YOUR_MODEL_NAME
 先安装好`uv`
 
 ```bash
-# version 0.1.0
+# version 0.3.0
 git checkout develop
 uv sync
 uv run python app.py
@@ -46,7 +46,7 @@ uv run python app.py
 uv add --dev langsmith
 export LANGSMITH_TRACING=true
 export LANGSMITH_API_KEY="ls-your-api-key"
-export LANGSMITH_PROJECT="mt-autooptimize"
+export LANGSMITH_PROJECT="MT-Agent"
 ```
 
 启动项目，运行一次，登陆`LangSmith`的[网站](https://smith.langchain.com)，检查项目运行情况。

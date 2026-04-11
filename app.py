@@ -1,4 +1,4 @@
-"""MT-AutoOptimize — 交互式 CLI 入口"""
+"""MT-Agent — 交互式 CLI 入口"""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from rich.console import Console
 from cli.banner import render_banner
 from cli.repl import Repl
 
-VERSION = "0.1.0"
+VERSION = "0.3.0"
 
 
 class App:
-    """MT-AutoOptimize 交互式 CLI"""
+    """MT-Agent 交互式 CLI"""
 
     def __init__(self) -> None:
         self.console = Console()
@@ -23,7 +23,7 @@ class App:
         self.console.print()
         render_banner(self.console)
         self.console.print()
-        self.console.print(f"  [bold]MT-AutoOptimize[/bold]  [dim]v{VERSION}[/dim]")
+        self.console.print(f"  [bold]MT-Agent[/bold]  [dim]v{VERSION}[/dim]")
         self.console.print("  [dim]MT-3000 AI Coding Agent  ·  分析 → 优化 → 编译[/dim]")
         self.console.print()
 

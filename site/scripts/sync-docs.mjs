@@ -5,7 +5,7 @@ const projectRoot = process.cwd()
 const docsRoot = path.resolve(projectRoot, '..', 'docs')
 const contentRoot = path.resolve(projectRoot, '.generated', 'content')
 const repoRoot = path.resolve(projectRoot, '..')
-const repoUrl = 'https://github.com/Iamnotphage/MT-AutoOptimize/blob/main'
+const repoUrl = 'https://github.com/Iamnotphage/MT-Agent/blob/main'
 
 function slugify(input) {
   return input

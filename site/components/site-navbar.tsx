@@ -52,17 +52,17 @@ const MaskedSvgIcon = ({
 const contactLinks = [
   {
     name: "GitHub Repo",
-    href: "https://github.com/Iamnotphage/MT-AutoOptimize",
+    href: "https://github.com/Iamnotphage/MT-Agent",
     icon: <MaskedSvgIcon src="/icons/github.svg" className="h-4 w-4" title="GitHub" />,
   },
   {
     name: "Docs Source",
-    href: "https://github.com/Iamnotphage/MT-AutoOptimize/tree/main/docs",
+    href: "https://github.com/Iamnotphage/MT-Agent/tree/main/docs",
     icon: <MaskedSvgIcon src="/icons/source.svg" className="h-4 w-4" title="Source" />,
   },
   {
     name: "Issues",
-    href: "https://github.com/Iamnotphage/MT-AutoOptimize/issues",
+    href: "https://github.com/Iamnotphage/MT-Agent/issues",
     icon: (
       <svg className="h-4 w-4 text-current" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
         <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -119,7 +119,7 @@ const NavbarLogo = () => (
     <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-neutral-100 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-50">
       <WikiLogo className="h-[18px] w-[18px]" />
     </div>
-    <span className="font-bold text-black dark:text-white">MT-AutoOptimize</span>
+    <span className="font-bold text-black dark:text-white">MT-Agent</span>
   </Link>
 )
 

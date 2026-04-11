@@ -55,8 +55,8 @@ const navLinks = [
 ];
 
 const socialLinks = [
-  { label: "GitHub", href: "https://github.com/Iamnotphage/MT-AutoOptimize", icon: "/icons/github.svg" },
-  { label: "Source", href: "https://github.com/Iamnotphage/MT-AutoOptimize/tree/main/docs", icon: "/icons/source.svg" },
+  { label: "GitHub", href: "https://github.com/Iamnotphage/MT-Agent", icon: "/icons/github.svg" },
+  { label: "Source", href: "https://github.com/Iamnotphage/MT-Agent/tree/main/docs", icon: "/icons/source.svg" },
 ];
 
 export function FooterLinks() {
@@ -70,7 +70,7 @@ export function FooterLinks() {
                 <WikiLogo className="h-5 w-5" />
               </span>
               <span className="text-xl font-semibold text-neutral-900 dark:text-neutral-100">
-                MT-AutoOptimize
+                MT-Agent
               </span>
             </Link>
             <p className="max-w-xs text-xs text-neutral-500 dark:text-neutral-400">
@@ -124,12 +124,12 @@ export function FooterLinks() {
 
         <div className="mt-8 flex flex-col items-center justify-between gap-2 border-t border-neutral-200 pt-8 dark:border-neutral-800 sm:flex-row">
           <p className="text-xs text-neutral-500 dark:text-neutral-400">
-            © 2026 MT-AutoOptimize
+            © 2026 MT-Agent
           </p>
           <span className="inline-flex items-center gap-1.5 text-sm text-neutral-500 dark:text-neutral-400">
             All rights reserved
             <a
-              href="https://github.com/Iamnotphage/MT-AutoOptimize"
+              href="https://github.com/Iamnotphage/MT-Agent"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center text-neutral-500 transition-colors hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200"
