@@ -9,4 +9,11 @@ output/reports/*
 # 配置文件
 .env
 
-
+# github pages
+site/node_modules/
+site/dist/
+site/out/
+site/.next/
+site/.velite/
+site/.generated/
+site/public/static/
