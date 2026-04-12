@@ -1,6 +1,5 @@
 'use client'
 
-import Image from 'next/image'
 import * as runtime from 'react/jsx-runtime'
 import { ComponentProps, useCallback, useEffect, useMemo, useState } from 'react'
 import { Children, isValidElement } from 'react'
@@ -343,25 +342,24 @@ function Li({ children, ...props }: ComponentProps<'li'>) {
   )
 }
 
-// 图片：小圆角 + 居中，仅用 img 避免被包在 <p> 时出现 div/figure 导致 hydration 报错
-const imgBaseClass =
-  'my-6 block h-auto max-w-[min(100%,42rem)] mx-auto rounded-lg'
+function isBadgeImage(src: string, alt?: string) {
+  return src.includes('shields.io') || /badge/i.test(alt ?? '')
+}
 
-function Img({ className, alt, src, width, height, ...props }: ComponentProps<'img'>) {
-  if (!src || typeof src !== 'string') {
-    return (
-      // eslint-disable-next-line @next/next/no-img-element -- fallback when src missing
-      <img {...props} src={src} alt={alt ?? ''} className={cn(imgBaseClass, className)} />
-    )
-  }
+function Img({ className, alt, src, ...props }: ComponentProps<'img'>) {
+  const resolvedSrc = typeof src === 'string' ? src : ''
+  const badge = resolvedSrc ? isBadgeImage(resolvedSrc, alt) : false
+  const resolvedClassName = badge
+    ? 'my-0 inline-block h-auto max-w-full align-middle rounded-none shadow-none'
+    : 'my-6 block h-auto max-w-full rounded-lg'
+
   return (
-    <Image
+    // eslint-disable-next-line @next/next/no-img-element -- markdown images should keep intrinsic GitHub-like sizing
+    <img
+      {...props}
       src={src}
       alt={alt ?? ''}
-      width={typeof width === 'number' ? width : 800}
-      height={typeof height === 'number' ? height : 600}
-      className={cn(imgBaseClass, className)}
-      unoptimized
+      className={cn(resolvedClassName, className)}
     />
   )
 }

@@ -5,11 +5,9 @@ import { IconMenu2, IconX } from "@tabler/icons-react";
 import {
   motion,
   AnimatePresence,
-  useScroll,
-  useMotionValueEvent,
 } from "motion/react";
 
-import React, { useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 
 
 interface NavbarProps {
@@ -57,26 +55,19 @@ interface MobileNavMenuProps {
 }
 
 export const Navbar = ({ children, className }: NavbarProps) => {
-  const ref = useRef<HTMLDivElement>(null);
-  const { scrollY } = useScroll({
-    target: ref,
-    offset: ["start start", "end start"],
-  });
   const [visible, setVisible] = useState<boolean>(false);
 
-  useMotionValueEvent(scrollY, "change", (latest) => {
-    if (latest > 100) {
-      setVisible(true);
-    } else {
-      setVisible(false);
-    }
-  });
+  useEffect(() => {
+    const handleScroll = () => {
+      setVisible(window.scrollY > 100);
+    };
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, []);
 
   return (
-    <motion.div
-      ref={ref}
-      // IMPORTANT: Change this to class of `fixed` if you want the navbar to be fixed
-      className={cn("sticky inset-x-0 top-0 z-40 w-full", className)}
+    <div
+      className={cn("relative sticky inset-x-0 top-0 z-40 w-full", className)}
     >
       {React.Children.map(children, (child) =>
         React.isValidElement(child)
@@ -86,15 +77,13 @@ export const Navbar = ({ children, className }: NavbarProps) => {
             )
           : child,
       )}
-    </motion.div>
+    </div>
   );
 };
 
 const DEFAULT_NAV_MIN_WIDTH = "800px";
 
 const navBodyAnimate = (visible: boolean) => ({
-  backdropFilter: visible ? "blur(20px) saturate(180%)" : "none",
-  WebkitBackdropFilter: visible ? "blur(20px) saturate(180%)" : "none",
   boxShadow: visible
     ? "0 0 24px rgba(34, 42, 53, 0.06), 0 1px 1px rgba(0, 0, 0, 0.05), 0 0 0 1px rgba(34, 42, 53, 0.04), 0 0 4px rgba(34, 42, 53, 0.08), 0 16px 68px rgba(47, 48, 55, 0.05), 0 1px 0 rgba(255, 255, 255, 0.1) inset"
     : "none",
@@ -116,7 +105,7 @@ export const NavBody = ({ children, className, visible, narrowMinWidth }: NavBod
         minWidth,
       }}
       className={cn(
-        "relative z-[60] mx-auto hidden w-full max-w-7xl flex-row items-center justify-between self-start rounded-full bg-transparent px-4 py-2 lg:flex dark:bg-transparent",
+        "relative z-[60] mx-auto hidden w-full max-w-7xl flex-row items-center justify-between self-start rounded-full bg-transparent px-4 py-2 lg:flex dark:bg-transparent backdrop-blur-md",
         visible &&
           "bg-white/70 dark:bg-neutral-950/60 dark:ring-1 dark:ring-white/10 dark:shadow-[0_0_0_1px_rgba(255,255,255,0.06)_inset]",
         className,
@@ -188,8 +177,6 @@ export const NavItems = ({ items, className, onItemClick, onTheWorldClick }: Nav
 };
 
 const mobileNavAnimate = (visible: boolean) => ({
-  backdropFilter: visible ? "blur(20px) saturate(180%)" : "none",
-  WebkitBackdropFilter: visible ? "blur(20px) saturate(180%)" : "none",
   boxShadow: visible
     ? "0 0 24px rgba(34, 42, 53, 0.06), 0 1px 1px rgba(0, 0, 0, 0.05), 0 0 0 1px rgba(34, 42, 53, 0.04), 0 0 4px rgba(34, 42, 53, 0.08), 0 16px 68px rgba(47, 48, 55, 0.05), 0 1px 0 rgba(255, 255, 255, 0.1) inset"
     : "none",
@@ -210,7 +197,7 @@ export const MobileNav = ({ children, className, visible }: MobileNavProps) => {
         damping: 50,
       }}
       className={cn(
-        "relative z-50 mx-auto flex w-full max-w-[calc(100vw-2rem)] flex-col items-center justify-between bg-transparent px-0 py-2 lg:hidden",
+        "relative z-50 mx-auto flex w-full max-w-[calc(100vw-2rem)] flex-col items-center justify-between bg-transparent px-0 py-2 lg:hidden backdrop-blur-md",
         visible &&
           "bg-white/70 dark:bg-neutral-950/60 dark:ring-1 dark:ring-white/10 dark:shadow-[0_0_0_1px_rgba(255,255,255,0.06)_inset]",
         className,

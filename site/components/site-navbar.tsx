@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from "react"
 import Link from "next/link"
+import { usePathname } from "next/navigation"
 import { AnimatePresence, motion } from "motion/react"
 import { useBlogSearch } from "@/components/blog-search-context"
 import {
@@ -21,6 +22,14 @@ const navItems = [
   { name: "Articles", link: "/articles" },
   { name: "Architecture", link: "/articles/architecture" },
   { name: "ReAct Loop", link: "/articles/reactloop" },
+]
+
+const docTabs = [
+  { name: "首页", link: "/" },
+  { name: "架构", link: "/articles/architecture" },
+  { name: "ReAct Loop", link: "/articles/reactloop" },
+  { name: "EventBus", link: "/articles/eventbus" },
+  { name: "Tools", link: "/articles/tools" },
 ]
 
 const MaskedSvgIcon = ({
@@ -123,8 +132,49 @@ const NavbarLogo = () => (
   </Link>
 )
 
+function isTabActive(pathname: string, href: string) {
+  if (href === "/") return pathname === "/"
+  if (href === "/articles") return pathname === "/articles"
+  return pathname === href
+}
+
+function DocTabs() {
+  const pathname = usePathname()
+
+  return (
+    <div className="border-b border-neutral-200/80 bg-white/88 dark:border-neutral-800/80 dark:bg-neutral-950/75">
+      <div className="mx-auto max-w-7xl px-4">
+        <nav
+          aria-label="文档标签"
+          className="scrollbar-none flex items-center gap-2 overflow-x-auto py-2"
+        >
+          {docTabs.map((tab) => {
+            const active = isTabActive(pathname, tab.link)
+
+            return (
+              <Link
+                key={tab.link}
+                href={tab.link}
+                className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium transition ${
+                  active
+                    ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-950"
+                    : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-300 dark:hover:bg-neutral-800 dark:hover:text-white"
+                }`}
+                aria-current={active ? "page" : undefined}
+              >
+                {tab.name}
+              </Link>
+            )
+          })}
+        </nav>
+      </div>
+    </div>
+  )
+}
+
 export function SiteNavbar() {
   const blogSearch = useBlogSearch()
+  const pathname = usePathname()
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isContactMenuOpen, setIsContactMenuOpen] = useState(false)
   const contactMenuRef = useRef<HTMLDivElement>(null)
@@ -192,141 +242,145 @@ export function SiteNavbar() {
   } as const
 
   return (
-    <Navbar>
-      <NavBody narrowMinWidth="980px">
-        <NavbarLogo />
-        <NavItems items={navItems} />
-        <div className="relative z-10 flex shrink-0 items-center gap-4">
-          <SearchTrigger />
-          <ThemeToggle />
-          <div className="relative" ref={contactMenuRef}>
-            <NavbarButton
-              variant="primary"
-              as="button"
-              onClick={() => setIsContactMenuOpen((v) => !v)}
-              aria-haspopup="menu"
-              aria-expanded={isContactMenuOpen}
-              aria-controls="contact-menu"
-              className="bg-neutral-900 text-white hover:bg-neutral-800 dark:bg-white dark:text-black dark:hover:bg-neutral-200"
-            >
-              Links
-            </NavbarButton>
-
-            <AnimatePresence>
-              {isContactMenuOpen && (
-                <motion.div
-                  id="contact-menu"
-                  role="menu"
-                  aria-label="Contact links"
-                  initial="closed"
-                  animate="open"
-                  exit="closed"
-                  variants={menuVariants}
-                  className="absolute right-0 top-full mt-2 z-50 min-w-[12rem] origin-top-right rounded-xl border border-neutral-200/70 bg-white/85 p-1 shadow-[0_20px_50px_-12px_rgba(0,0,0,0.25)] backdrop-blur-md dark:border-neutral-700/60 dark:bg-neutral-950/70"
-                >
-                  <div className="absolute -top-1 right-5 h-2 w-2 rotate-45 rounded-[2px] border border-neutral-200/70 bg-white/85 backdrop-blur-md dark:border-neutral-700/60 dark:bg-neutral-950/70" />
-
-                  <motion.div
-                    variants={{
-                      open: { transition: { staggerChildren: 0.045 } },
-                      closed: { transition: { staggerChildren: 0.02 } },
-                    }}
-                    className="flex flex-col gap-1"
-                  >
-                    {contactLinks.map((link, idx) => (
-                      <motion.a
-                        key={`contact-${idx}`}
-                        role="menuitem"
-                        href={link.href}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        variants={itemVariants}
-                        whileHover={{ x: 2 }}
-                        whileTap={{ scale: 0.98 }}
-                        className="group flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-neutral-700 transition-colors hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800/70"
-                        onClick={() => setIsContactMenuOpen(false)}
-                      >
-                        <span className="flex h-5 w-5 items-center justify-center">
-                          {link.icon}
-                        </span>
-                        <span className="whitespace-nowrap">{link.name}</span>
-                        <span className="ml-auto text-xs text-neutral-400 opacity-0 transition-opacity group-hover:opacity-100 dark:text-neutral-500">
-                          ↗
-                        </span>
-                      </motion.a>
-                    ))}
-                  </motion.div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        </div>
-      </NavBody>
-
-      <MobileNav>
-        <MobileNavHeader>
+    <>
+      <Navbar>
+        <NavBody narrowMinWidth="980px">
           <NavbarLogo />
-          <div className="flex items-center gap-2">
+          <NavItems items={navItems} />
+          <div className="relative z-10 flex shrink-0 items-center gap-4">
+            <SearchTrigger />
             <ThemeToggle />
-            <MobileNavToggle
-              isOpen={isMobileMenuOpen}
-              onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-            />
-          </div>
-        </MobileNavHeader>
-
-        <MobileNavMenu
-          isOpen={isMobileMenuOpen}
-          onClose={() => setIsMobileMenuOpen(false)}
-        >
-          {navItems.map((item, idx) => (
-            <a
-              key={`mobile-link-${idx}`}
-              href={item.link}
-              onClick={() => setIsMobileMenuOpen(false)}
-              className="relative text-neutral-600 dark:text-neutral-300"
-            >
-              <span className="block">{item.name}</span>
-            </a>
-          ))}
-
-          <div className="flex w-full flex-col gap-2 mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-700">
-            <span className="text-xs font-semibold text-neutral-500 dark:text-neutral-400 px-2">
-              Project links
-            </span>
-            {contactLinks.map((link, idx) => (
-              <a
-                key={idx}
-                href={link.href}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-3 px-2 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-md transition-colors"
-                onClick={() => setIsMobileMenuOpen(false)}
+            <div className="relative" ref={contactMenuRef}>
+              <NavbarButton
+                variant="primary"
+                as="button"
+                onClick={() => setIsContactMenuOpen((v) => !v)}
+                aria-haspopup="menu"
+                aria-expanded={isContactMenuOpen}
+                aria-controls="contact-menu"
+                className="bg-neutral-900 text-white hover:bg-neutral-800 dark:bg-white dark:text-black dark:hover:bg-neutral-200"
               >
-                <span className="flex h-6 w-6 items-center justify-center">
-                  {link.icon}
-                </span>
-                <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
-                  {link.name}
-                </span>
+                Links
+              </NavbarButton>
+
+              <AnimatePresence>
+                {isContactMenuOpen && (
+                  <motion.div
+                    id="contact-menu"
+                    role="menu"
+                    aria-label="Contact links"
+                    initial="closed"
+                    animate="open"
+                    exit="closed"
+                    variants={menuVariants}
+                    className="absolute right-0 top-full mt-2 z-50 min-w-[12rem] origin-top-right rounded-xl border border-neutral-200/70 bg-white/85 p-1 shadow-[0_20px_50px_-12px_rgba(0,0,0,0.25)] backdrop-blur-md dark:border-neutral-700/60 dark:bg-neutral-950/70"
+                  >
+                    <div className="absolute -top-1 right-5 h-2 w-2 rotate-45 rounded-[2px] border border-neutral-200/70 bg-white/85 backdrop-blur-md dark:border-neutral-700/60 dark:bg-neutral-950/70" />
+
+                    <motion.div
+                      variants={{
+                        open: { transition: { staggerChildren: 0.045 } },
+                        closed: { transition: { staggerChildren: 0.02 } },
+                      }}
+                      className="flex flex-col gap-1"
+                    >
+                      {contactLinks.map((link, idx) => (
+                        <motion.a
+                          key={`contact-${idx}`}
+                          role="menuitem"
+                          href={link.href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          variants={itemVariants}
+                          whileHover={{ x: 2 }}
+                          whileTap={{ scale: 0.98 }}
+                          className="group flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-neutral-700 transition-colors hover:bg-neutral-100 dark:text-neutral-200 dark:hover:bg-neutral-800/70"
+                          onClick={() => setIsContactMenuOpen(false)}
+                        >
+                          <span className="flex h-5 w-5 items-center justify-center">
+                            {link.icon}
+                          </span>
+                          <span className="whitespace-nowrap">{link.name}</span>
+                          <span className="ml-auto text-xs text-neutral-400 opacity-0 transition-opacity group-hover:opacity-100 dark:text-neutral-500">
+                            ↗
+                          </span>
+                        </motion.a>
+                      ))}
+                    </motion.div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
+        </NavBody>
+
+        <MobileNav>
+          <MobileNavHeader>
+            <NavbarLogo />
+            <div className="flex items-center gap-2">
+              <ThemeToggle />
+              <MobileNavToggle
+                isOpen={isMobileMenuOpen}
+                onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+              />
+            </div>
+          </MobileNavHeader>
+
+          <MobileNavMenu
+            isOpen={isMobileMenuOpen}
+            onClose={() => setIsMobileMenuOpen(false)}
+          >
+            {navItems.map((item, idx) => (
+              <a
+                key={`mobile-link-${idx}`}
+                href={item.link}
+                onClick={() => setIsMobileMenuOpen(false)}
+                className={`relative ${pathname === item.link ? "text-neutral-900 dark:text-white" : "text-neutral-600 dark:text-neutral-300"}`}
+              >
+                <span className="block">{item.name}</span>
               </a>
             ))}
-            <button
-              type="button"
-              onClick={() => {
-                setIsMobileMenuOpen(false)
-                blogSearch?.openSearch()
-              }}
-              className="flex items-center gap-3 rounded-md px-2 py-2 text-sm font-medium text-neutral-700 transition-colors hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800"
-            >
-              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden>
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
-              Search docs
-            </button>
-          </div>
-        </MobileNavMenu>
-      </MobileNav>
-    </Navbar>
+
+            <div className="flex w-full flex-col gap-2 mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-700">
+              <span className="text-xs font-semibold text-neutral-500 dark:text-neutral-400 px-2">
+                Project links
+              </span>
+              {contactLinks.map((link, idx) => (
+                <a
+                  key={idx}
+                  href={link.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 px-2 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-md transition-colors"
+                  onClick={() => setIsMobileMenuOpen(false)}
+                >
+                  <span className="flex h-6 w-6 items-center justify-center">
+                    {link.icon}
+                  </span>
+                  <span className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                    {link.name}
+                  </span>
+                </a>
+              ))}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsMobileMenuOpen(false)
+                  blogSearch?.openSearch()
+                }}
+                className="flex items-center gap-3 rounded-md px-2 py-2 text-sm font-medium text-neutral-700 transition-colors hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-800"
+              >
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                Search docs
+              </button>
+            </div>
+          </MobileNavMenu>
+        </MobileNav>
+      </Navbar>
+
+      <DocTabs />
+    </>
   )
 }
