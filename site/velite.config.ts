@@ -8,8 +8,11 @@ import rehypeKatex from 'rehype-katex'
 import remarkGemoji from 'remark-gemoji'
 import rehypeMermaid from 'rehype-mermaid'
 import { visit } from 'unist-util-visit'
-import type { Root } from 'hast'
-import type { Root as MdastRoot } from 'mdast'
+import type { Element, Root } from 'hast'
+import type { Code, Parent, Root as MdastRoot } from 'mdast'
+
+const mermaidStrategy =
+  process.env.CI || process.env.GITHUB_ACTIONS ? 'pre-mermaid' : 'inline-svg'
 
 /** 兼容单行三反引号：```foo``` -> 代码块（默认 text），避免被 mdast 解析成 inlineCode */
 function remarkSingleLineFencedCode() {
@@ -17,8 +20,9 @@ function remarkSingleLineFencedCode() {
     const source = typeof file?.value === 'string' ? file.value : ''
     if (!source) return
 
-    visit(tree, 'paragraph', (node) => {
+    visit(tree, 'paragraph', (node, index, parent) => {
       if (node.children.length !== 1) return
+      if (index == null || !parent) return
 
       const only = node.children[0]
       if (only.type !== 'inlineCode' || !node.position) return
@@ -30,11 +34,14 @@ function remarkSingleLineFencedCode() {
       const raw = source.slice(startOffset, endOffset).trim()
       if (!/^```[^`\r\n]+```$/.test(raw)) return
 
-      node.type = 'code'
-      ;(node as unknown as { lang?: string; meta?: string | null; value?: string }).lang = 'text'
-      ;(node as unknown as { lang?: string; meta?: string | null; value?: string }).meta = null
-      ;(node as unknown as { lang?: string; meta?: string | null; value?: string }).value = only.value
-      delete (node as unknown as { children?: unknown }).children
+      const codeNode: Code = {
+        type: 'code',
+        lang: 'text',
+        meta: null,
+        value: only.value,
+        position: node.position,
+      }
+      ;(parent as Parent).children[index] = codeNode
     })
   }
 }
@@ -172,6 +179,22 @@ function rehypeGitHubRawImages() {
   }
 }
 
+function rehypeMermaidErrorFallback(element: Element, diagram: string) {
+  return {
+    type: 'element',
+    tagName: 'pre',
+    properties: { className: ['mermaid'] },
+    children: [
+      {
+        type: 'element',
+        tagName: 'code',
+        properties: { className: ['language-mermaid'] },
+        children: [{ type: 'text', value: diagram }],
+      },
+    ],
+  } as const
+}
+
 const docs = defineCollection({
   name: 'Doc',
   pattern: '**/*.mdx',
@@ -217,7 +240,7 @@ export default defineConfig({
       ],
       rehypeGitHubRawImages,
       // Mermaid 必须在 pretty-code 之前，避免先被高亮器改写
-      [rehypeMermaid, { strategy: 'inline-svg' }],
+      [rehypeMermaid, { strategy: mermaidStrategy, errorFallback: rehypeMermaidErrorFallback }],
       [rehypePrettyCode, { theme: 'one-dark-pro' }],
       [
         rehypeKatex,
