@@ -1,4 +1,4 @@
-"""MT-AutoOptimize — REPL 交互循环
+"""MT-Agent — REPL 交互循环
 
 纯粹的 Read-Eval-Print Loop 骨架。
 渲染、命令处理、输入组件均委托给独立模块。
