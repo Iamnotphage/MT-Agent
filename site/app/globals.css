@@ -161,6 +161,11 @@
   padding: 0;
 }
 
+/* Inline code in GFM-style tables should stay on one line and let the table scroll horizontally. */
+.prose :where(th, td) code {
+  white-space: nowrap;
+}
+
 /* GitHub Alerts (remark-alerts) */
 .prose .markdown-alert {
   position: relative;

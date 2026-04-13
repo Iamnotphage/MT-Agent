@@ -191,7 +191,7 @@ function H4({ children, ...props }: ComponentProps<'h4'>) {
 
 // Inline code（code block 内的 code 由 data-language 区分，不做内联样式）
 const inlineCodeClass =
-  'rounded-sm border border-neutral-300/90 bg-neutral-100 px-1 py-px font-mono text-[0.9em] text-neutral-800 dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-200 break-all'
+  'rounded-md bg-neutral-100 px-[0.4em] py-[0.2em] font-mono text-[0.85em] text-neutral-800 whitespace-break-spaces dark:bg-neutral-800/90 dark:text-neutral-200'
 
 function Code({
   children,
