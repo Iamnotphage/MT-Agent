@@ -211,7 +211,10 @@ const docs = defineCollection({
     })
     .transform(data => ({
       ...data,
-      permalink: data.kind === 'readme' ? '/' : `/articles/${data.slug}`,
+      permalink:
+        data.kind === 'readme'
+          ? '/'
+          : `/documents/${data.slug}`,
     })),
 })
 

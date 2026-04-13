@@ -1,6 +1,3 @@
-我需要根据gemini-cli的源码，自制一个MT-3000平台的Agent for Coding
-首先，MT-3000是超算迈创平台，异构架构，目前实现的功能是调用LLM的API进行简单的prompt拼接和问答，不能称之为Agent，没有ReAct循环。
-
 总体来说，gemini-cli的ReAct循环核心可以分为如下层级:
 
 - A. 用户层
@@ -41,9 +38,12 @@ Phase3: 观察[ReAct循环]
 13. packages/core内核层将最终答案传递给packages/cli交互层
 14. packages/cli交互层渲染最终结果给用户层
 
-现在，此项目的根目录下，有一个大致的开发计划`./PLAN.md`(不一定完全准确)
 我们的技术栈主要用LangChain/LangGraph
+
 gemini-cli的源码主要参考`~/Documents/code/projects/gemini-cli`
+
 现在请你生成详细的开发计划，将目前的项目做成类似gemini-cli或者claude code的coding agent
-生成的开发计划放置在项目根目录，命名`dev-plan.md`
+
+生成的开发计划放置在项目根目录，命名`PLAN.md`
+
 请ultrathink: 

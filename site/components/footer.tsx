@@ -49,9 +49,7 @@ function WikiLogo({ className }: { className?: string }) {
 
 const navLinks = [
   { label: "README", href: "/" },
-  { label: "Articles", href: "/articles" },
-  { label: "Architecture", href: "/articles/architecture" },
-  { label: "ReAct Loop", href: "/articles/reactloop" },
+  { label: "文档", href: "/documents/README" },
 ];
 
 const socialLinks = [

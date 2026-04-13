@@ -17,19 +17,9 @@ import {
 } from "@/components/ui/resizable-navbar"
 import { ThemeToggle } from "@/components/ui/theme-toggle"
 
-const navItems = [
+const primaryNavItems = [
   { name: "README", link: "/" },
-  { name: "Articles", link: "/articles" },
-  { name: "Architecture", link: "/articles/architecture" },
-  { name: "ReAct Loop", link: "/articles/reactloop" },
-]
-
-const docTabs = [
-  { name: "首页", link: "/" },
-  { name: "架构", link: "/articles/architecture" },
-  { name: "ReAct Loop", link: "/articles/reactloop" },
-  { name: "EventBus", link: "/articles/eventbus" },
-  { name: "Tools", link: "/articles/tools" },
+  { name: "文档", link: "/documents/README" },
 ]
 
 const MaskedSvgIcon = ({
@@ -134,7 +124,7 @@ const NavbarLogo = () => (
 
 function isTabActive(pathname: string, href: string) {
   if (href === "/") return pathname === "/"
-  if (href === "/articles") return pathname === "/articles"
+  if (href === "/documents/README") return pathname === "/documents/README" || pathname.startsWith("/documents/")
   return pathname === href
 }
 
@@ -148,7 +138,7 @@ function DocTabs() {
           aria-label="文档标签"
           className="scrollbar-none flex items-center gap-2 overflow-x-auto py-2"
         >
-          {docTabs.map((tab) => {
+          {primaryNavItems.map((tab) => {
             const active = isTabActive(pathname, tab.link)
 
             return (
@@ -246,7 +236,7 @@ export function SiteNavbar() {
       <Navbar>
         <NavBody narrowMinWidth="980px">
           <NavbarLogo />
-          <NavItems items={navItems} />
+          <NavItems items={primaryNavItems} />
           <div className="relative z-10 flex shrink-0 items-center gap-4">
             <SearchTrigger />
             <ThemeToggle />
@@ -330,12 +320,12 @@ export function SiteNavbar() {
             isOpen={isMobileMenuOpen}
             onClose={() => setIsMobileMenuOpen(false)}
           >
-            {navItems.map((item, idx) => (
+            {primaryNavItems.map((item, idx) => (
               <a
                 key={`mobile-link-${idx}`}
                 href={item.link}
                 onClick={() => setIsMobileMenuOpen(false)}
-                className={`relative ${pathname === item.link ? "text-neutral-900 dark:text-white" : "text-neutral-600 dark:text-neutral-300"}`}
+                className={`relative ${isTabActive(pathname, item.link) ? "text-neutral-900 dark:text-white" : "text-neutral-600 dark:text-neutral-300"}`}
               >
                 <span className="block">{item.name}</span>
               </a>

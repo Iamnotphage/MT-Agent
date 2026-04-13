@@ -61,7 +61,7 @@ export function BlogTableOfContents({ className }: BlogTableOfContentsProps) {
       aria-label="Table of contents"
       className={cn('space-y-2 text-sm', className)}
     >
-      <div className="font-medium text-neutral-700 dark:text-neutral-300">On this page</div>
+      <div className="font-medium text-neutral-700 dark:text-neutral-300">目录</div>
       <ul className="space-y-1.5">
         {items.map(({ id, text, level }) => (
           <li

@@ -199,7 +199,7 @@ function rewriteMarkdownRefs(content, sourceFile) {
         return `${bang}](/${hash})`
       }
 
-      return `${bang}](/articles/${slugify(basename)}${hash})`
+      return `${bang}](/documents/${basename === 'README.md' ? 'README' : slugify(basename)}${hash})`
     }
 
     if (normalizedTarget.startsWith('docs/imgs/') || normalizedTarget.startsWith('./imgs/')) {
@@ -287,6 +287,18 @@ function main() {
         ),
       ),
     ),
+  })
+
+  writeDocFile({
+    targetPath: path.join(contentRoot, 'docs', 'index.mdx'),
+    title: extractTitle(docsReadmeContent, 'Documentation'),
+    description: extractDescription(docsReadmeContent),
+    slug: 'README',
+    kind: 'docs-index',
+    order: 0,
+    sourcePath: 'docs/README.md',
+    toc: true,
+    body: escapeMdxText(preservePlainTextLineBreaks(rewriteMarkdownRefs(docsReadmeContent, docsReadmePath))),
   })
 
   for (const fileName of fs.readdirSync(docsRoot)) {
