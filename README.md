@@ -1,4 +1,10 @@
-# MT-AutoOptimize
+# MT-Agent
+
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-1.13%2B-0F172A)
+![LangChain](https://img.shields.io/badge/LangChain-1.2.13%2B-1C3C3C)
+![uv](https://img.shields.io/badge/uv-0.7.6-DE5FE9)
+![Next.js](https://img.shields.io/badge/Docs-Next.js-000000?logo=nextdotjs&logoColor=white)
 
 ![banner](docs/imgs/banner.png)
 
@@ -32,7 +38,7 @@ MODEL_NAME=YOUR_MODEL_NAME
 先安装好`uv`
 
 ```bash
-# version 0.1.0
+# version 0.3.0
 git checkout develop
 uv sync
 uv run python app.py
@@ -46,7 +52,7 @@ uv run python app.py
 uv add --dev langsmith
 export LANGSMITH_TRACING=true
 export LANGSMITH_API_KEY="ls-your-api-key"
-export LANGSMITH_PROJECT="mt-autooptimize"
+export LANGSMITH_PROJECT="MT-Agent"
 ```
 
 启动项目，运行一次，登陆`LangSmith`的[网站](https://smith.langchain.com)，检查项目运行情况。

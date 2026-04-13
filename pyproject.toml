@@ -1,10 +1,10 @@
 [project]
-name = "mt-autooptimize"
+name = "MT-Agent"
 authors = [
   {name = "Chen", email = "iamnotphage@163.com"},
 ]
-version = "0.1.0"
-description = "MT-3000 coding agent"
+version = "0.3.0"
+description = "Coding Agent for MT-3000"
 requires-python = ">=3.10"
 dependencies = [
     "dotenv>=0.9.9",
