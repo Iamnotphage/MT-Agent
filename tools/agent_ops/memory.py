@@ -3,7 +3,7 @@
 Agent 通过 function calling 调用此工具，将重要事实写入
 ~/.mtagent/CONTEXT.md 的 ## Agent Memories 区域。
 
-遵循三层架构: Tool 不直接 import Core，通过 callback 访问 ContextManager。
+遵循三层架构: Tool 不直接 import Core，通过 callback 访问 MemoryManager/ContextManager。
 """
 
 from __future__ import annotations
@@ -33,11 +33,12 @@ class SaveMemoryTool(BaseTool):
     risk_level = ToolRiskLevel.LOW
     args_schema = SaveMemoryArgs
 
-    def __init__(self, save_fn: Callable[[str], None]) -> None:
+    def __init__(self, save_fn: Callable[[str], str | None]) -> None:
         """
         Args:
-            save_fn: 写入记忆的回调函数，签名为 (fact: str) -> None。
-                     由 AgentRuntime 传入 context_manager.save_memory。
+            save_fn: 写入记忆的回调函数，签名为 (fact: str) -> str | None。
+                     由 AgentRuntime 传入 memory_manager.save_memory
+                     或 context_manager.save_memory。
         """
         self._save_fn = save_fn
 

@@ -25,11 +25,11 @@ logger = logging.getLogger(__name__)
 # 类型引用，避免硬依赖
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from core.compressor import CompressResult
+    from core.context.compressor import CompressResult
     from core.context import ContextManager
     from core.session import SessionStats
 
-from core.compressor import ContextCompressor
+from core.context.compressor import ContextCompressor
 
 
 def create_reasoning_node(

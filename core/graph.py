@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from core.context import ContextManager
     from core.session import SessionStats
-    from core.compressor import ContextCompressor
+    from core.context.compressor import ContextCompressor
 
 def build_agent_graph(
     llm: BaseChatModel,

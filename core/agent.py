@@ -14,8 +14,9 @@ from typing import Any
 
 from config import load_llm_config
 from config.settings import CONTEXT as CONTEXT_CONFIG
-from core.compressor import ContextCompressor
+from core.context.compressor import ContextCompressor
 from core.context import ContextManager
+from core.memory import MemoryManager
 from core.session import SessionRecorder
 from core.event_bus import EventBus
 from core.graph import build_agent_graph
@@ -32,6 +33,7 @@ class AgentRuntime:
     registry: ToolRegistry
     workspace: str
     context_manager: ContextManager
+    memory_manager: MemoryManager
     session: SessionRecorder
     checkpoint_manager: AbstractContextManager[Any] | None = None
 
@@ -82,6 +84,10 @@ def create_agent_runtime(
     # Context & Memory — 必须在工具注册之前初始化，因为 save_memory tool 需要回调
     ws = workspace or os.getcwd()
     ctx_manager = ContextManager(working_directory=ws, config=CONTEXT_CONFIG)
+    memory_manager = MemoryManager(
+        ctx_manager.global_context_path,
+        on_update=ctx_manager.refresh_global_context,
+    )
     ctx_manager.load()
 
     session = SessionRecorder(working_directory=ws, config=CONTEXT_CONFIG)
@@ -90,7 +96,7 @@ def create_agent_runtime(
     registry = ToolRegistry()
     registry.register(*create_default_tools(
         workspace=ws,
-        save_memory_fn=ctx_manager.save_memory,
+        save_memory_fn=memory_manager.save_memory,
     ))
 
     # 上下文压缩器
@@ -122,6 +128,7 @@ def create_agent_runtime(
         registry=registry,
         workspace=ws,
         context_manager=ctx_manager,
+        memory_manager=memory_manager,
         session=session,
         checkpoint_manager=checkpoint_manager,
     )

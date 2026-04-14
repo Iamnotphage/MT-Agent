@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.context import ContextManager, MEMORY_SECTION_HEADER
+from core.memory import MemoryManager
 from core.session import SessionStats, SessionRecorder
 from core.utils.tokens import estimate_tokens
 from config.settings import CONTEXT as DEFAULT_CONFIG
@@ -48,6 +49,15 @@ def cm(tmp_workspace, config):
     """创建 ContextManager 实例。"""
     tmp_workspace.mkdir(parents=True, exist_ok=True)
     return ContextManager(working_directory=str(tmp_workspace), config=config)
+
+
+@pytest.fixture
+def mm(cm, config):
+    """创建 MemoryManager 实例。"""
+    return MemoryManager(
+        Path(config["global_dir"]) / "CONTEXT.md",
+        on_update=cm.refresh_global_context,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -194,14 +204,27 @@ class TestBuildSessionContext:
 # ---------------------------------------------------------------------------
 
 class TestMemoryCRUD:
-    def test_save_memory_creates_section(self, cm, config):
+    def test_context_cache_updates_after_save_memory(self, cm, mm, config):
+        """save_memory 后无需 reload 也能更新 system context 和 stats。"""
+        global_dir = Path(config["global_dir"])
+        (global_dir / "CONTEXT.md").write_text("全局指令", encoding="utf-8")
+        cm.load()
+
+        mm.save_memory("缓存应立即刷新")
+
+        assert "缓存应立即刷新" in cm.build_system_context()
+        assert "缓存应立即刷新" in mm.get_memories(cm.build_system_context())
+        assert cm.stats["memories_count"] == 1
+
+    def test_save_memory_creates_section(self, cm, mm, config):
         """首次保存 memory 时创建 ## Agent Memories section。"""
         global_dir = Path(config["global_dir"])
         (global_dir / "CONTEXT.md").write_text("全局指令", encoding="utf-8")
         cm.load()
 
-        cm.save_memory("用户偏好 AM 模式")
-        memories = cm.get_memories()
+        updated = mm.save_memory("用户偏好 AM 模式")
+        cm.reload()
+        memories = mm.get_memories(updated or "")
         assert len(memories) == 1
         assert "用户偏好 AM 模式" in memories[0]
 
@@ -211,69 +234,82 @@ class TestMemoryCRUD:
         assert "- 用户偏好 AM 模式" in content
         assert "全局指令" in content  # 原有内容不丢失
 
-    def test_save_multiple_memories(self, cm, config):
+    def test_save_multiple_memories(self, cm, mm, config):
         """保存多条 memory。"""
         global_dir = Path(config["global_dir"])
         (global_dir / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
 
-        cm.save_memory("fact 1")
-        cm.save_memory("fact 2")
-        cm.save_memory("fact 3")
-        assert len(cm.get_memories()) == 3
+        mm.save_memory("fact 1")
+        mm.save_memory("fact 2")
+        updated = mm.save_memory("fact 3")
+        assert len(mm.get_memories(updated or "")) == 3
 
-    def test_save_memory_to_nonexistent_file(self, cm, config):
+    def test_save_memory_to_nonexistent_file(self, cm, mm, config):
         """全局 CONTEXT.md 不存在时自动创建。"""
         cm.load()
-        cm.save_memory("new fact")
-        assert len(cm.get_memories()) == 1
+        updated = mm.save_memory("new fact")
+        assert len(mm.get_memories(updated or "")) == 1
 
         content = (Path(config["global_dir"]) / "CONTEXT.md").read_text(encoding="utf-8")
         assert "- new fact" in content
 
-    def test_save_memory_sanitizes_input(self, cm, config):
+    def test_save_memory_sanitizes_input(self, cm, mm, config):
         """移除换行和前导 dash。"""
         (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
 
-        cm.save_memory("- multi\nline\nfact")
-        memories = cm.get_memories()
+        updated = mm.save_memory("- multi\nline\nfact")
+        memories = mm.get_memories(updated or "")
         assert len(memories) == 1
         assert "\n" not in memories[0]
         assert not memories[0].startswith("- ")
 
-    def test_save_empty_memory_ignored(self, cm, config):
+    def test_save_empty_memory_ignored(self, cm, mm, config):
         """空内容不保存。"""
         (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
-        cm.save_memory("")
-        cm.save_memory("   ")
-        assert len(cm.get_memories()) == 0
+        mm.save_memory("")
+        updated = mm.save_memory("   ")
+        assert len(mm.get_memories(updated or "")) == 0
 
-    def test_remove_memory(self, cm, config):
+    def test_remove_memory(self, cm, mm, config):
         """按索引删除 memory。"""
         (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
 
-        cm.save_memory("keep this")
-        cm.save_memory("remove this")
-        cm.save_memory("keep this too")
+        mm.save_memory("keep this")
+        mm.save_memory("remove this")
+        mm.save_memory("keep this too")
 
-        result = cm.remove_memory(1)
+        result, updated = mm.remove_memory(1)
         assert result is True
-        memories = cm.get_memories()
+        memories = mm.get_memories(updated or "")
         assert len(memories) == 2
         assert "remove this" not in memories
 
-    def test_remove_memory_invalid_index(self, cm, config):
+    def test_context_cache_updates_after_remove_memory(self, cm, mm, config):
+        """remove_memory 后无需 reload 也能更新缓存统计。"""
+        (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
+        cm.load()
+
+        mm.save_memory("keep")
+        mm.save_memory("remove")
+        ok, _ = mm.remove_memory(1)
+
+        assert ok is True
+        assert mm.get_memories(cm.build_system_context()) == ["keep"]
+        assert cm.stats["memories_count"] == 1
+
+    def test_remove_memory_invalid_index(self, cm, mm, config):
         """无效索引返回 False。"""
         (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
-        cm.save_memory("only one")
-        assert cm.remove_memory(5) is False
-        assert cm.remove_memory(-1) is False
+        mm.save_memory("only one")
+        assert mm.remove_memory(5)[0] is False
+        assert mm.remove_memory(-1)[0] is False
 
-    def test_memory_persists_with_existing_content(self, cm, config):
+    def test_memory_persists_with_existing_content(self, cm, mm, config):
         """已有内容和其他 section 不被破坏。"""
         global_dir = Path(config["global_dir"])
         (global_dir / "CONTEXT.md").write_text(
@@ -281,7 +317,7 @@ class TestMemoryCRUD:
             encoding="utf-8",
         )
         cm.load()
-        cm.save_memory("a fact")
+        mm.save_memory("a fact")
 
         content = (global_dir / "CONTEXT.md").read_text(encoding="utf-8")
         assert "# My Config" in content
@@ -388,7 +424,7 @@ class TestEnsureGlobalSetup:
 # ---------------------------------------------------------------------------
 
 class TestSaveMemoryTool:
-    def test_save_via_tool(self, cm, config):
+    def test_save_via_tool(self, cm, mm, config):
         """通过 SaveMemoryTool 保存记忆。"""
         import asyncio
         from tools.agent_ops.memory import SaveMemoryTool
@@ -396,12 +432,12 @@ class TestSaveMemoryTool:
         (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
 
-        tool = SaveMemoryTool(save_fn=cm.save_memory)
+        tool = SaveMemoryTool(save_fn=mm.save_memory)
         result = asyncio.run(tool.execute(fact="用户偏好 AM 模式"))
 
         assert result.success
         assert "已保存" in result.output
-        assert len(cm.get_memories()) == 1
+        assert len(mm.get_memories((Path(config["global_dir"]) / "CONTEXT.md").read_text(encoding="utf-8"))) == 1
 
     def test_empty_fact_rejected(self):
         """空 fact 被拒绝。"""

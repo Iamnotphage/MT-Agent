@@ -23,7 +23,7 @@ class TestReadFileTool:
         return ReadFileTool(workspace=workspace)
 
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     def test_read_full_file(self, tool):
         r = self._run(tool.execute(file_path="hello.txt"))
@@ -90,7 +90,7 @@ class TestToolRegistry:
         assert schemas[0]["function"]["name"] == "read_file"
 
     def test_execute_unknown_tool(self, registry):
-        r = asyncio.get_event_loop().run_until_complete(
+        r = asyncio.run(
             registry.execute("no_such_tool", {})
         )
         assert not r.success
@@ -98,7 +98,7 @@ class TestToolRegistry:
 
     def test_execute_with_validation(self, registry, tmp_path):
         (tmp_path / "a.txt").write_text("hello")
-        r = asyncio.get_event_loop().run_until_complete(
+        r = asyncio.run(
             registry.execute("read_file", {"file_path": "a.txt"})
         )
         assert r.success

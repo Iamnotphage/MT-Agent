@@ -4,7 +4,7 @@ import pytest
 from langchain_core.messages import AIMessageChunk, HumanMessage
 
 from core.event_bus import EventType
-from core.compressor import ContextCompressor
+from core.context.compressor import ContextCompressor
 from core.session import SessionStats
 from core.nodes.reasoning import create_reasoning_node, should_use_tools
 

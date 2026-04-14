@@ -288,7 +288,7 @@ class Repl:
             case "/context":
                 cmd_context(self.console, self.runtime.context_manager, parts[1:])
             case "/memory":
-                cmd_memory(self.console, self.runtime.context_manager, parts[1:])
+                cmd_memory(self.console, self.runtime.memory_manager, parts[1:])
             case _:
                 self.console.print(f"  [red]未知命令:[/red] {cmd}")
                 self.console.print("  [dim]输入 /help 查看可用命令[/dim]")
