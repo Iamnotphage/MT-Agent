@@ -5,11 +5,13 @@
   - 工具成功: 绿色 ⏺ + 工具名 + 参数 + 结果摘要
   - 工具失败: 红色 ⏺ + 工具名 + 错误信息
   - 并行工具: 缓冲所有事件, 全部完成后统一渲染
+  - 思考中: 动画 spinner + 计时器
 """
 
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -37,6 +39,9 @@ class _ToolRecord:
 class StreamHandler:
     """订阅 EventBus 事件，实时渲染到 Console 并录制到 SessionRecorder。"""
 
+    # Spinner 动画帧（类似 Claude Code）
+    SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
     def __init__(self, console: Console, event_bus: EventBus, session: SessionRecorder) -> None:
         self._console = console
         self._session = session
@@ -45,6 +50,12 @@ class StreamHandler:
         self._streaming = False
         self._content_buf: list[str] = []
         self._thought_buf: list[str] = []
+
+        # 思考动画状态
+        self._thinking = False
+        self._thinking_start_time = 0.0
+        self._thinking_thread: threading.Thread | None = None
+        self._thinking_stop = threading.Event()
 
         # 工具批次缓冲 (线程安全)
         self._tool_records: dict[str, _ToolRecord] = {}  # call_id -> record
@@ -66,8 +77,75 @@ class StreamHandler:
 
     # ── 流式控制 ─────────────────────────────────────────────────
 
+    def start_thinking(self) -> None:
+        """手动启动思考动画（从 REPL 调用）"""
+        self._start_thinking_animation()
+
+    def _start_thinking_animation(self) -> None:
+        """启动思考动画（在后台线程中运行）"""
+        if self._thinking:
+            return
+
+        self._thinking = True
+        self._thinking_start_time = time.time()
+        self._thinking_stop.clear()
+
+        def _animate():
+            frame_idx = 0
+            while not self._thinking_stop.is_set():
+                elapsed = time.time() - self._thinking_start_time
+                hours = int(elapsed // 3600)
+                minutes = int((elapsed % 3600) // 60)
+                seconds = int(elapsed % 60)
+
+                # 格式化时间
+                if hours > 0:
+                    time_str = f"{hours}h{minutes}m{seconds}s"
+                elif minutes > 0:
+                    time_str = f"{minutes}m{seconds}s"
+                else:
+                    time_str = f"{seconds}s"
+
+                # 渲染动画帧（橙色）
+                spinner = self.SPINNER_FRAMES[frame_idx % len(self.SPINNER_FRAMES)]
+                line = f"{spinner} Thinking ({time_str})"
+
+                # 清除当前行并重新渲染
+                import sys
+                sys.stdout.write(f"\r{' ' * 80}\r")  # 先清除
+                sys.stdout.flush()
+
+                self._console.print(
+                    f"[#FFA500]{line}[/#FFA500]",
+                    end="",
+                    highlight=False
+                )
+
+                frame_idx += 1
+                time.sleep(0.1)  # 100ms 更新一次
+
+        self._thinking_thread = threading.Thread(target=_animate, daemon=True)
+        self._thinking_thread.start()
+
+    def _stop_thinking_animation(self) -> None:
+        """停止思考动画"""
+        if not self._thinking:
+            return
+
+        self._thinking_stop.set()
+        if self._thinking_thread:
+            self._thinking_thread.join(timeout=0.5)
+
+        # 清除动画行
+        import sys
+        sys.stdout.write(f"\r{' ' * 80}\r")
+        sys.stdout.flush()
+
+        self._thinking = False
+
     def _end_content_stream(self) -> None:
         """仅结束 LLM 文字流式输出 (不 flush 工具缓冲)"""
+        self._stop_thinking_animation()
         if self._streaming:
             self._console.print()
             self._streaming = False
@@ -89,6 +167,7 @@ class StreamHandler:
         if not text:
             return
         if not self._streaming:
+            self._stop_thinking_animation()  # 停止思考动画
             self._flush_tool_buffer()
             self._console.print()
             self._console.print("⏺ ", end="", style="bold white")
@@ -101,8 +180,11 @@ class StreamHandler:
         text = event.data.get("text", "")
         if not text:
             return
-        self.end_stream()
-        self._console.print(f"  [dim italic]{text}[/dim italic]", end="", highlight=False)
+        # 结束内容流，但不 flush 工具缓冲
+        self._end_content_stream()
+        # 渲染思考内容（灰色斜体）
+        self._console.print()
+        self._console.print(f"  [dim italic]💭 {text}[/dim italic]", highlight=False)
         self._thought_buf.append(text)
 
     # ── 工具事件: 缓冲 → 批量渲染 ──────────────────────────────
@@ -121,6 +203,10 @@ class StreamHandler:
                 arguments=args,
             )
             self._expected_count += 1
+
+            # 工具调用时也停止思考动画
+            if self._expected_count == 1:
+                self._stop_thinking_animation()
 
         self._session.record({"type": "tool_request", "tool_name": name, "arguments": args})
 

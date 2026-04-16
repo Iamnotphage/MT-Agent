@@ -28,6 +28,7 @@ from cli.utils.text import (
     PROMPT_STYLE,
     PROMPT_SYMBOL,
     RISK_STYLE,
+    display_width,
     ljust_cols,
     truncate,
 )
@@ -101,6 +102,9 @@ class Repl:
         state_input: dict | Command = {
             "messages": [HumanMessage(content=user_input)],
         }
+
+        # 启动思考动画
+        self._stream.start_thinking()
 
         try:
             self.runtime.graph.invoke(state_input, config)
@@ -344,8 +348,17 @@ class Repl:
 
     def _render_user_input(self, user_input: str) -> None:
         """用灰色背景重新渲染用户输入行"""
-        # 计算需要清除的行数：上分界线(1) + 输入行(1) + 下分界线(1) + 状态栏(1，如果有)
-        lines_to_clear = 3
+        # 计算输入实际占用的行数（考虑换行和自动折行）
+        lines = user_input.split('\n')
+        total_input_lines = 0
+        for line in lines:
+            content = f"{PROMPT_SYMBOL} {line}"
+            # 计算这一行需要多少终端行（考虑自动折行）
+            line_width = display_width(content)
+            total_input_lines += max(1, (line_width + self.console.width - 1) // self.console.width)
+
+        # 需要清除的行数：上分界线(1) + 输入行(N) + 下分界线(1) + 状态栏(1，如果有)
+        lines_to_clear = 1 + total_input_lines + 1
         if self._context_status():  # 如果有状态栏
             lines_to_clear += 1
 
@@ -355,8 +368,12 @@ class Repl:
         sys.stdout.write("\r")
         sys.stdout.flush()
 
-        # 只渲染用户输入行（不包括分界线和状态栏）
-        line = Text(no_wrap=True)
-        content = f"{PROMPT_SYMBOL} {user_input}"
-        line.append(ljust_cols(content, self.console.width), style=BG_USER)
-        self.console.print(line)
+        # 渲染用户输入（支持多行，每行都有背景色）
+        for i, line in enumerate(lines):
+            text = Text(no_wrap=True)
+            if i == 0:
+                content = f"{PROMPT_SYMBOL} {line}"
+            else:
+                content = f"  {line}"  # 续行缩进
+            text.append(ljust_cols(content, self.console.width), style=BG_USER)
+            self.console.print(text)
