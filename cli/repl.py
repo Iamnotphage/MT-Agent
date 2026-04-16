@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from langgraph.types import Command
@@ -46,6 +47,7 @@ class Repl:
         self._closed = False
         self._history = InMemoryHistory()
         self._token_limit = CONTEXT_CONFIG.get("token_limit", 65536)
+        self._working_dir = Path(runtime.context_manager._working_dir)
 
         # 事件处理（渲染 + 录制）
         self._stream = StreamHandler(
@@ -320,19 +322,40 @@ class Repl:
     # ── 上下文状态 ─────────────────────────────────────────────
 
     def _context_status(self) -> str:
-        """返回上下文占比文本，如 '42%' 或空字符串。"""
-        last = self.runtime.session.stats.last_input_tokens
+        """返回上下文状态文本，格式: '{model_name} · {剩余百分比}% left · {工作目录}'。"""
+        stats = self.runtime.session.stats
+        model = stats.model or "unknown"
+        last = stats.last_input_tokens
+
         if last <= 0:
-            return ""
-        pct = min(last / self._token_limit * 100, 100)
-        return f"{pct:.0f}%"
+            remaining_pct = 100
+        else:
+            remaining_pct = max(int((1 - last / self._token_limit) * 100), 0)
+
+        # 获取工作目录完整路径，如果在 home 目录下则用 ~ 替换
+        working_dir = str(self._working_dir)
+        home = str(Path.home())
+        if working_dir.startswith(home):
+            working_dir = "~" + working_dir[len(home):]
+
+        return f"{model} · {remaining_pct}% left · {working_dir}"
 
     # ── 渲染辅助 ─────────────────────────────────────────────────
 
     def _render_user_input(self, user_input: str) -> None:
         """用灰色背景重新渲染用户输入行"""
-        sys.stdout.write("\x1b[A\x1b[2K\r")
+        # 计算需要清除的行数：上分界线(1) + 输入行(1) + 下分界线(1) + 状态栏(1，如果有)
+        lines_to_clear = 3
+        if self._context_status():  # 如果有状态栏
+            lines_to_clear += 1
+
+        # 向上移动并清除所有行
+        for _ in range(lines_to_clear):
+            sys.stdout.write("\x1b[A\x1b[2K")
+        sys.stdout.write("\r")
         sys.stdout.flush()
+
+        # 只渲染用户输入行（不包括分界线和状态栏）
         line = Text(no_wrap=True)
         content = f"{PROMPT_SYMBOL} {user_input}"
         line.append(ljust_cols(content, self.console.width), style=BG_USER)

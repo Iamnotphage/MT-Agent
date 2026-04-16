@@ -110,12 +110,28 @@ class ContextCompressor:
     def _generate_summary(self, old_messages: list[BaseMessage]) -> str:
         conversation_text = self._serialize_messages(old_messages)
 
+        # 限制输入大小，避免压缩本身超限
+        from core.utils.tokens import estimate_tokens
+        input_tokens = estimate_tokens(conversation_text)
+
+        # 如果输入太大（超过 20k tokens），使用简单摘要而不是调用 LLM
+        if input_tokens > 20000:
+            logger.warning(
+                "Conversation text too large (%d tokens), using simple summary instead of LLM compression",
+                input_tokens
+            )
+            return (
+                f"Previous conversation history ({len(old_messages)} messages) "
+                "has been compressed due to context length limits. "
+                "Key information may have been preserved in recent messages."
+            )
+
         compress_messages = [
             SystemMessage(content=COMPRESSION_SYSTEM_PROMPT),
             HumanMessage(
                 content=(
                     "Please compress the following conversation history "
-                    "into a structured snapshot:\n\n"
+                    "into a structured snapshot (max 500 words):\n\n"
                     f"{conversation_text}"
                 ),
             ),
@@ -123,7 +139,16 @@ class ContextCompressor:
 
         try:
             response = self._llm.invoke(compress_messages)
-            return response.content.strip() if response.content else ""
+            summary = response.content.strip() if response.content else ""
+
+            # 检查摘要大小，如果太大则截断
+            summary_tokens = estimate_tokens(summary)
+            if summary_tokens > 5000:
+                logger.warning("Summary too large (%d tokens), truncating", summary_tokens)
+                # 截断到约 5000 tokens (约 20000 字符)
+                summary = summary[:20000] + "\n\n[Summary truncated due to length]"
+
+            return summary
         except Exception as e:
             logger.error("Compression LLM call failed: %s", e)
             return ""
@@ -139,11 +164,11 @@ class ContextCompressor:
                 tool_names = [tc["name"] for tc in msg.tool_calls]
                 parts.append(f"[{role}] (called tools: {', '.join(tool_names)})")
                 if content:
-                    parts.append(f"  {_truncate(content, 500)}")
+                    parts.append(f"  {_truncate(content, 200)}")  # 减少到 200
             elif isinstance(msg, ToolMessage):
-                parts.append(f"[tool:{msg.name}] {_truncate(content, 300)}")
+                parts.append(f"[tool:{msg.name}] {_truncate(content, 150)}")  # 减少到 150
             else:
-                parts.append(f"[{role}] {_truncate(content, 800)}")
+                parts.append(f"[{role}] {_truncate(content, 300)}")  # 减少到 300
 
         return "\n".join(parts)
 

@@ -100,39 +100,64 @@ def read_input(
         if not buf.text:
             event.app.exit(exception=EOFError())
 
-    # ── 状态栏（右侧显示上下文占比等信息）────────────────────
+    # ── 状态栏（输入框底下显示上下文信息）────────────────────
     def _render_status() -> FormattedText:
         if status_func is None:
             return FormattedText([])
         text = status_func()
         if not text:
             return FormattedText([])
-        return FormattedText([("fg:#847ACE", text)])
+        return FormattedText([("fg:#6C6C6C", text)])
 
-    _has_status = Condition(lambda: status_func is not None)
+    _has_status = Condition(lambda: status_func is not None and bool(status_func()))
 
-    # 输入行: 左侧输入框 + 右侧状态
-    input_row = VSplit([
-        Window(
-            content=BufferControl(buffer=buf),
-            get_line_prefix=lambda lineno, wc: _pfx if lineno == 0 and wc == 0 else _pfx_wrap,
-            dont_extend_height=True,
-            wrap_lines=True,
-        ),
-        ConditionalContainer(
-            Window(
-                content=FormattedTextControl(_render_status),
-                dont_extend_height=True,
-                width=12,
-                align=1,  # right align
-            ),
-            filter=_has_status,
-        ),
-    ])
+    # 上分界线（根据终端宽度动态调整）
+    def _render_top_separator() -> FormattedText:
+        from prompt_toolkit.application import get_app
+        try:
+            width = get_app().output.get_size().columns
+        except Exception:
+            width = 80
+        return FormattedText([("fg:#6C6C6C", "─" * width)])
+
+    # 下分界线（根据终端宽度动态调整）
+    def _render_bottom_separator() -> FormattedText:
+        from prompt_toolkit.application import get_app
+        try:
+            width = get_app().output.get_size().columns
+        except Exception:
+            width = 80
+        return FormattedText([("fg:#6C6C6C", "─" * width)])
+
+    # 输入行: 只有输入框
+    input_row = Window(
+        content=BufferControl(buffer=buf),
+        get_line_prefix=lambda lineno, wc: _pfx if lineno == 0 and wc == 0 else _pfx_wrap,
+        dont_extend_height=True,
+        wrap_lines=True,
+    )
 
     layout = Layout(
         HSplit([
+            Window(
+                content=FormattedTextControl(_render_top_separator),
+                dont_extend_height=True,
+                height=1,
+            ),
             input_row,
+            Window(
+                content=FormattedTextControl(_render_bottom_separator),
+                dont_extend_height=True,
+                height=1,
+            ),
+            ConditionalContainer(
+                Window(
+                    content=FormattedTextControl(_render_status),
+                    dont_extend_height=True,
+                    height=1,
+                ),
+                filter=_has_status,
+            ),
             ConditionalContainer(
                 Window(
                     content=FormattedTextControl(_render_dropdown),
