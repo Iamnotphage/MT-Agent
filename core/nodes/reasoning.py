@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from core.context.compressor import CompressResult
     from core.context import ContextManager
     from core.session import SessionStats
+    from tools.base import BaseTool as ProjectBaseTool
 
 from core.context.compressor import ContextCompressor
 
@@ -35,7 +36,7 @@ from core.context.compressor import ContextCompressor
 def create_reasoning_node(
     llm: BaseChatModel,
     event_bus: EventBus,
-    tool_schemas: list[dict[str, Any]] | None = None,
+    tools: list[ProjectBaseTool] | None = None,
     context_manager: ContextManager | None = None,
     session_stats: SessionStats | None = None,
     compressor: ContextCompressor | None = None,
@@ -46,7 +47,7 @@ def create_reasoning_node(
     Args:
         llm: LangChain ChatModel (如 ChatOpenAI)
         event_bus: 事件总线, 用于向 CLI 层推送流式事件
-        tool_schemas: OpenAI function-calling 格式的工具定义列表
+        tools: 工具实例列表 (langchain BaseTool)
         context_manager: Context & Memory 管理器 (可选)
         session_stats: 会话统计 (可选，用于记录 token usage)
         compressor: 上下文压缩器 (可选，当 token 超阈值时自动压缩)
@@ -54,14 +55,14 @@ def create_reasoning_node(
     Returns:
         LangGraph 节点函数 ``(AgentState) -> dict``
     """
-    bound_llm = llm.bind_tools(tool_schemas) if tool_schemas else llm
+    bound_llm = llm.bind_tools(tools) if tools else llm
 
     def reasoning_node(state: AgentState) -> dict:
         turn = state.get("turn_count", 0)
 
         # 0) 压缩检查 — 在构建 messages 之前, 检查是否需要压缩历史
         compress_result = None
-        history = list(state.get("message", []))
+        history = list(state.get("messages", []))
         if compressor is not None and session_stats is not None:
             compress_result = _maybe_compress(
                 compressor, event_bus, session_stats, state,
@@ -73,11 +74,10 @@ def create_reasoning_node(
             global_context = context_manager.build_system_context()
 
         system_msg = SystemMessage(
-            content=build_system_prompt(state, tool_schemas, global_context=global_context)
+            content=build_system_prompt(state, tools, global_context=global_context)
         )
 
         # 2) 构建 messages: system + session_context (Tier 2, 仅首轮) + 历史
-        #    如果发生了压缩，state.message 已被更新（通过 compress_updates 返回的 message 操作）
         messages = [system_msg]
 
         if turn == 0 and context_manager is not None:
@@ -96,7 +96,7 @@ def create_reasoning_node(
         if session_stats is not None:
             _record_token_usage(collected, session_stats)
 
-        # 5) 构造 AIMessage 写入 state.message 历史
+        # 5) 构造 AIMessage 写入 state.messages 历史
         ai_message = AIMessage(
             content=collected.content or "",
             tool_calls=collected.tool_calls or [],
@@ -111,7 +111,7 @@ def create_reasoning_node(
             turn=turn,
         ))
 
-        # 6) tool_calls → pending_tool_calls
+        # 6) tool_calls → pending_tool_calls (供 tool_routing 审批)
         pending = _extract_tool_calls(collected, event_bus, turn)
 
         # 7) TURN_START 事件
@@ -131,14 +131,14 @@ def create_reasoning_node(
         )
 
         result = {
-            "message": [ai_message],
+            "messages": [ai_message],
             "turn_count": turn + 1,
             "pending_tool_calls": pending,
         }
 
         # 合并压缩操作 — RemoveMessage + summary_message 需要和 ai_message 一起写入 state
         if compress_result is not None:
-            result["message"] = _build_compression_message_ops(compress_result) + result["message"]
+            result["messages"] = _build_compression_message_ops(compress_result) + result["messages"]
 
         return result
 
@@ -254,7 +254,6 @@ def _record_token_usage(
     session_stats: SessionStats,
 ) -> None:
     """从 LLM 响应中提取 token usage 并记录到 SessionStats。"""
-    # 优先从 usage_metadata 取 (LangChain 标准)
     usage = getattr(response, "usage_metadata", None)
     if usage and isinstance(usage, dict):
         session_stats.record_llm_usage(
@@ -279,15 +278,11 @@ def _maybe_compress(
     session_stats: SessionStats,
     state: AgentState,
 ) -> CompressResult | None:
-    """检查是否需要压缩，若需要则执行并返回 state 更新。
-
-    Returns:
-        CompressResult，或 None 表示无需压缩。
-    """
+    """检查是否需要压缩，若需要则执行并返回 state 更新。"""
     if not compressor.should_compress(session_stats.last_input_tokens):
         return None
 
-    history = list(state.get("message", []))
+    history = list(state.get("messages", []))
     if not history:
         return None
 

@@ -96,7 +96,7 @@ def needs_approval(state: AgentState) -> str:
 
         graph.add_conditional_edges("tool_routing", needs_approval, {
             "needs_approval": "human_approval",
-            "approved": "tool_execution",
+            "approved": "tools",
         })
     """
     if state.get("needs_human_approval"):

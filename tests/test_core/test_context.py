@@ -426,38 +426,33 @@ class TestEnsureGlobalSetup:
 class TestSaveMemoryTool:
     def test_save_via_tool(self, cm, mm, config):
         """通过 SaveMemoryTool 保存记忆。"""
-        import asyncio
         from tools.agent_ops.memory import SaveMemoryTool
 
         (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
 
         tool = SaveMemoryTool(save_fn=mm.save_memory)
-        result = asyncio.run(tool.execute(fact="用户偏好 AM 模式"))
+        content, artifact = tool._run(fact="用户偏好 AM 模式")
 
-        assert result.success
-        assert "已保存" in result.output
+        assert "已保存" in content
         assert len(mm.get_memories((Path(config["global_dir"]) / "CONTEXT.md").read_text(encoding="utf-8"))) == 1
 
     def test_empty_fact_rejected(self):
         """空 fact 被拒绝。"""
-        import asyncio
+        from langchain_core.tools.base import ToolException
         from tools.agent_ops.memory import SaveMemoryTool
 
         tool = SaveMemoryTool(save_fn=lambda f: None)
-        result = asyncio.run(tool.execute(fact=""))
+        with pytest.raises(ToolException, match="不能为空"):
+            tool._run(fact="")
 
-        assert not result.success
-        assert "不能为空" in result.error
-
-    def test_schema_shape(self):
-        """Tool schema 格式正确。"""
+    def test_invoke_via_langchain(self):
+        """langchain invoke 接口可用"""
         from tools.agent_ops.memory import SaveMemoryTool
 
         tool = SaveMemoryTool(save_fn=lambda f: None)
-        schema = tool.schema
-        assert schema["function"]["name"] == "save_memory"
-        assert "fact" in schema["function"]["parameters"]["properties"]
+        result = tool.invoke({"fact": "test fact"})
+        assert "已保存" in result
 
 
 # ---------------------------------------------------------------------------

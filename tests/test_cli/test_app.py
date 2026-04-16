@@ -27,7 +27,7 @@ def test_app_run_closes_repl_on_keyboard_interrupt(monkeypatch):
         (),
         {
             "workspace": "/tmp/project",
-            "registry": type("Registry", (), {"names": ["read_file"]})(),
+            "tools": [type("FakeTool", (), {"name": "read_file"})()],
             "context_manager": type("CM", (), {"stats": {"loaded_files": 0, "memories_count": 0}})(),
         },
     )()

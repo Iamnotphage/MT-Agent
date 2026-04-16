@@ -97,7 +97,7 @@ class Repl:
 
         config = {"configurable": {"thread_id": self.thread_id}}
         state_input: dict | Command = {
-            "message": [HumanMessage(content=user_input)],
+            "messages": [HumanMessage(content=user_input)],
         }
 
         try:

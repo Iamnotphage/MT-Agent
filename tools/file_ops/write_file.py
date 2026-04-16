@@ -1,18 +1,16 @@
-"""WriteFile 工具 — 写入/创建文件
-
-路径安全校验 → 读取原始内容 → 写入新内容 → 返回结构化 DiffResult。
-Diff 渲染由 CLI 层负责（cli/diff_renderer.py）。
-"""
+"""WriteFile 工具 — 写入/创建文件"""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
+from langchain_core.tools.base import ToolException
 from pydantic import BaseModel, Field
 
-from core.utils.diff import DiffResult, generate_diff
-from tools.base import BaseTool, ToolResult, ToolRiskLevel
+from core.utils.diff import generate_diff
+from tools.base import BaseTool, ToolRiskLevel
 
 
 class WriteFileArgs(BaseModel):
@@ -21,26 +19,28 @@ class WriteFileArgs(BaseModel):
 
 
 class WriteFileTool(BaseTool):
-    name = "write_file"
-    description = (
+    name: str = "write_file"
+    description: str = (
         "Write content to a file. Creates the file and parent directories if they don't exist. "
         "If the file exists, it will be overwritten and a diff is returned for review. "
         "Must provide complete file content."
     )
-    risk_level = ToolRiskLevel.MEDIUM
-    args_schema = WriteFileArgs
+    risk_level: ToolRiskLevel = ToolRiskLevel.MEDIUM
+    response_format: str = "content_and_artifact"
+    args_schema: type = WriteFileArgs
+    workspace: Path = Field(default_factory=lambda: Path.cwd())
 
-    def __init__(self, *, workspace: str | Path | None = None) -> None:
-        self.workspace = Path(workspace or os.getcwd()).resolve()
+    def __init__(self, *, workspace: str | Path | None = None, **kwargs: Any) -> None:
+        super().__init__(workspace=Path(workspace or os.getcwd()).resolve(), **kwargs)
 
-    async def execute(self, *, file_path: str, content: str) -> ToolResult:
+    def _run(self, *, file_path: str, content: str) -> tuple[str, dict]:
         resolved = (self.workspace / file_path).resolve()
 
         if not str(resolved).startswith(str(self.workspace)):
-            return ToolResult(output="", error=f"Path out of bounds: {file_path} is not within workspace")
+            raise ToolException(f"Path out of bounds: {file_path} is not within workspace")
 
         if resolved.exists() and resolved.is_dir():
-            return ToolResult(output="", error=f"Target is a directory, not a file: {file_path}")
+            raise ToolException(f"Target is a directory, not a file: {file_path}")
 
         is_new = not resolved.exists()
 
@@ -49,15 +49,15 @@ class WriteFileTool(BaseTool):
             try:
                 original = resolved.read_text(encoding="utf-8", errors="replace")
             except OSError as e:
-                return ToolResult(output="", error=f"Failed to read original file: {e}")
+                raise ToolException(f"Failed to read original file: {e}")
 
         try:
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding="utf-8")
         except PermissionError:
-            return ToolResult(output="", error=f"Permission denied: {file_path}")
+            raise ToolException(f"Permission denied: {file_path}")
         except OSError as e:
-            return ToolResult(output="", error=f"Write failed: {e}")
+            raise ToolException(f"Write failed: {e}")
 
         diff = generate_diff(file_path, original, content, is_new=is_new)
 
@@ -70,10 +70,10 @@ class WriteFileTool(BaseTool):
                 preview += "\n... (diff truncated)"
             llm_output += f"\n\nDiff:\n{preview}"
 
-        return ToolResult(
-            output=llm_output,
-            display=f"{file_path} ({diff.stat})",
-            metadata={
+        return (
+            llm_output,
+            {
+                "display": f"{file_path} ({diff.stat})",
                 "is_new": is_new,
                 "lines": total_lines,
                 "diff": diff,

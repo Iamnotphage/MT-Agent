@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from langchain_core.messages import ToolMessage
 from langgraph.types import interrupt
 
 from core.event_bus import AgentEvent, EventBus, EventType
@@ -52,6 +53,7 @@ def create_human_approval_node(
         # ── 根据决策更新 pending_tool_calls 状态 ──
         pending = state.get("pending_tool_calls", [])
         updated_calls: list[ToolCallInfo] = []
+        rejection_messages: list[ToolMessage] = []
 
         for tc in pending:
             if tc["status"] != "awaiting_approval":
@@ -59,8 +61,16 @@ def create_human_approval_node(
                 continue
 
             approved = decisions.get(tc["call_id"], False)
-            new_status = "pending" if approved else "cancelled"
-            updated_calls.append({**tc, "status": new_status})
+            if approved:
+                updated_calls.append({**tc, "status": "pending"})
+            else:
+                updated_calls.append({**tc, "status": "cancelled"})
+                # 为被拒绝的 tool_call 生成 ToolMessage，防止 ToolNode 执行它们
+                rejection_messages.append(ToolMessage(
+                    content="[用户拒绝执行此工具]",
+                    tool_call_id=tc["call_id"],
+                    name=tc["tool_name"],
+                ))
 
         # ── 发送 APPROVAL_RESPONSE 事件 ──
         event_bus.emit(AgentEvent(
@@ -75,11 +85,15 @@ def create_human_approval_node(
             sum(1 for v in decisions.values() if not v),
         )
 
-        return {
+        result: dict[str, Any] = {
             "pending_tool_calls": updated_calls,
             "needs_human_approval": False,
             "approval_requests": [],
         }
+        if rejection_messages:
+            result["messages"] = rejection_messages
+
+        return result
 
     return human_approval_node
 

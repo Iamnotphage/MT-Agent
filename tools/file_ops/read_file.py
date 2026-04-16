@@ -1,17 +1,15 @@
-"""ReadFile 工具 — 读取文件内容（支持行范围、自动截断）
-
-仿 Gemini CLI read_file：路径安全校验 → 行切片 → 截断提示。
-"""
+"""ReadFile 工具 — 读取文件内容（支持行范围、自动截断）"""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
+from langchain_core.tools.base import ToolException
 from pydantic import BaseModel, Field
 
-from tools.base import BaseTool, ToolResult, ToolRiskLevel
+from tools.base import BaseTool, ToolRiskLevel
 
 MAX_LINES = 500
 MAX_CHARS = 50_000
@@ -19,41 +17,43 @@ MAX_CHARS = 50_000
 
 class ReadFileArgs(BaseModel):
     file_path: str = Field(description="Path to the file to read (relative to workspace)")
-    start_line: Optional[int] = Field(None, ge=1, description="Start line number (1-based, inclusive)")
-    end_line: Optional[int] = Field(None, ge=1, description="End line number (1-based, inclusive)")
+    start_line: int | None = Field(None, ge=1, description="Start line number (1-based, inclusive)")
+    end_line: int | None = Field(None, ge=1, description="End line number (1-based, inclusive)")
 
 
 class ReadFileTool(BaseTool):
-    name = "read_file"
-    description = (
+    name: str = "read_file"
+    description: str = (
         "Read file contents. Supports line range selection via start_line/end_line. "
         "Large files are automatically truncated with guidance on how to continue reading."
     )
-    risk_level = ToolRiskLevel.LOW
-    args_schema = ReadFileArgs
+    risk_level: ToolRiskLevel = ToolRiskLevel.LOW
+    response_format: str = "content_and_artifact"
+    args_schema: type = ReadFileArgs
+    workspace: Path = Field(default_factory=lambda: Path.cwd())
 
-    def __init__(self, *, workspace: str | Path | None = None) -> None:
-        self.workspace = Path(workspace or os.getcwd()).resolve()
+    def __init__(self, *, workspace: str | Path | None = None, **kwargs: Any) -> None:
+        super().__init__(workspace=Path(workspace or os.getcwd()).resolve(), **kwargs)
 
-    async def execute(
+    def _run(
         self,
         *,
         file_path: str,
         start_line: int | None = None,
         end_line: int | None = None,
-    ) -> ToolResult:
+    ) -> tuple[str, dict]:
         resolved = (self.workspace / file_path).resolve()
 
         if not str(resolved).startswith(str(self.workspace)):
-            return ToolResult(output="", error=f"路径越界: {file_path} 不在工作区内")
+            raise ToolException(f"路径越界: {file_path} 不在工作区内")
 
         if not resolved.is_file():
-            return ToolResult(output="", error=f"文件不存在: {file_path}")
+            raise ToolException(f"文件不存在: {file_path}")
 
         try:
             text = resolved.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
-            return ToolResult(output="", error=f"读取失败: {e}")
+            raise ToolException(f"读取失败: {e}")
 
         lines = text.splitlines(keepends=True)
         total = len(lines)
@@ -83,8 +83,11 @@ class ReadFileTool(BaseTool):
                 f"Use start_line={shown_hi + 1} to continue reading."
             )
 
-        return ToolResult(
-            output=f"{header}\n\n{content}",
-            display=f"{file_path} ({shown_hi - shown_lo + 1} lines)",
-            metadata={"total_lines": total, "truncated": truncated},
+        return (
+            f"{header}\n\n{content}",
+            {
+                "display": f"{file_path} ({shown_hi - shown_lo + 1} lines)",
+                "total_lines": total,
+                "truncated": truncated,
+            },
         )

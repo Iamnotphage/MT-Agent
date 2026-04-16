@@ -41,7 +41,7 @@ class App:
             return
 
         self.console.print(f"  [dim]工作目录  {runtime.workspace}[/dim]")
-        self.console.print(f"  [dim]已注册工具  {', '.join(runtime.registry.names)}[/dim]")
+        self.console.print(f"  [dim]已注册工具  {', '.join(t.name for t in runtime.tools)}[/dim]")
 
         # Context & Memory 加载信息
         cm = runtime.context_manager

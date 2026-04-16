@@ -1,19 +1,16 @@
-"""Grep tool — search for regex patterns in files
-
-Path safety validation → regex search across files → format results with line numbers.
-Supports file filtering via glob patterns and respects .gitignore.
-"""
+"""Grep tool — search for regex patterns in files"""
 
 from __future__ import annotations
 
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
+from langchain_core.tools.base import ToolException
 from pydantic import BaseModel, Field
 
-from tools.base import BaseTool, ToolResult, ToolRiskLevel
+from tools.base import BaseTool, ToolRiskLevel
 
 _ALWAYS_IGNORE = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
@@ -25,52 +22,54 @@ class GrepArgs(BaseModel):
     pattern: str = Field(
         description="Regular expression pattern to search for (e.g., 'function\\s+\\w+')"
     )
-    path: Optional[str] = Field(
+    path: str | None = Field(
         default=None,
         description="Directory path to search within (relative to workspace). If omitted, searches workspace root.",
     )
-    include: Optional[str] = Field(
+    include: str | None = Field(
         default=None,
         description="Glob pattern to filter files (e.g., '*.py', 'src/**/*.ts')",
     )
 
 
 class GrepTool(BaseTool):
-    name = "grep"
-    description = (
+    name: str = "grep"
+    description: str = (
         "Search for a regular expression pattern within file contents. "
         "Returns matching lines with file paths and line numbers. "
         "Supports file filtering via glob patterns."
     )
-    risk_level = ToolRiskLevel.LOW
-    args_schema = GrepArgs
+    risk_level: ToolRiskLevel = ToolRiskLevel.LOW
+    response_format: str = "content_and_artifact"
+    args_schema: type = GrepArgs
+    workspace: Path = Field(default_factory=lambda: Path.cwd())
 
-    def __init__(self, *, workspace: str | Path | None = None) -> None:
-        self.workspace = Path(workspace or os.getcwd()).resolve()
+    def __init__(self, *, workspace: str | Path | None = None, **kwargs: Any) -> None:
+        super().__init__(workspace=Path(workspace or os.getcwd()).resolve(), **kwargs)
 
-    async def execute(
+    def _run(
         self,
         *,
         pattern: str,
         path: str | None = None,
         include: str | None = None,
-    ) -> ToolResult:
+    ) -> tuple[str, dict]:
         try:
             regex = re.compile(pattern, re.IGNORECASE)
         except re.error as e:
-            return ToolResult(output="", error=f"Invalid regex pattern: {e}")
+            raise ToolException(f"Invalid regex pattern: {e}")
 
         search_dir = self.workspace / (path or ".")
         resolved = search_dir.resolve()
 
         if not str(resolved).startswith(str(self.workspace)):
-            return ToolResult(output="", error=f"Path out of bounds: {path} is not within workspace")
+            raise ToolException(f"Path out of bounds: {path} is not within workspace")
 
         if not resolved.exists():
-            return ToolResult(output="", error=f"Directory does not exist: {path}")
+            raise ToolException(f"Directory does not exist: {path}")
 
         if not resolved.is_dir():
-            return ToolResult(output="", error=f"Path is not a directory: {path}")
+            raise ToolException(f"Path is not a directory: {path}")
 
         matches = []
         try:
@@ -97,7 +96,7 @@ class GrepTool(BaseTool):
                     continue
 
         except Exception as e:
-            return ToolResult(output="", error=f"Search failed: {e}")
+            raise ToolException(f"Search failed: {e}")
 
         if not matches:
             msg = f'Found 0 matches for pattern "{pattern}"'
@@ -105,7 +104,7 @@ class GrepTool(BaseTool):
                 msg += f' in "{path}"'
             if include:
                 msg += f' (filter: "{include}")'
-            return ToolResult(output=msg, display=msg)
+            return msg, {"display": msg}
 
         lines = []
         current_file = None
@@ -129,4 +128,4 @@ class GrepTool(BaseTool):
         if include:
             display += f' in {include}'
 
-        return ToolResult(output=llm_output, display=display)
+        return llm_output, {"display": display}

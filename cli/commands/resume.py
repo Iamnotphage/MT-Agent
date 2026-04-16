@@ -76,7 +76,7 @@ def cmd_resume(
                 console.print("  [red]待审批工具状态不完整：存在 awaiting_approval，但没有可恢复的审批请求[/red]")
                 return None
             restored_from_checkpoint = True
-            restored_messages = snapshot_values.get("message") or messages
+            restored_messages = snapshot_values.get("messages") or messages
             session.stats.last_input_tokens = session.estimate_messages_tokens(restored_messages)
     except Exception:
         snapshot = None
@@ -108,9 +108,9 @@ def cmd_resume(
 
 
 def _is_pending_tool_execution(snapshot: Any) -> bool:
-    """判断 checkpoint 是否停在未完成的 tool_execution。"""
+    """判断 checkpoint 是否停在未完成的 tools 节点。"""
     next_nodes = getattr(snapshot, "next", ()) or ()
-    return "tool_execution" in next_nodes
+    return "tools" in next_nodes or "tool_execution" in next_nodes
 
 
 def _has_awaiting_approval(snapshot: Any) -> bool:
@@ -140,7 +140,7 @@ def _build_resume_consistency_notices(
     """构建 checkpoint / transcript 一致性提示。"""
     notices: list[str] = []
     snapshot_values = getattr(snapshot, "values", None) or {}
-    checkpoint_messages = snapshot_values.get("message") or []
+    checkpoint_messages = snapshot_values.get("messages") or []
 
     if checkpoint_messages and not transcript_messages:
         notices.append("恢复以 checkpoint 为准；本地 transcript 缺失，历史展示可能不完整。")
@@ -189,12 +189,11 @@ def _recover_interrupted_tool_execution(
     graph.update_state(
         config,
         {
-            "message": interrupted_messages,
+            "messages": interrupted_messages,
             "pending_tool_calls": [],
-            "completed_tool_calls": [],
             "should_continue": False,
         },
-        as_node="observation",
+        as_node="tools",
     )
     console.print(
         f"  [yellow]检测到 {len(interrupted_calls)} 个未完成工具执行，"
@@ -295,13 +294,11 @@ def _render_resumed_history(console: Console, records: list[dict]) -> None:
             elif role == "assistant":
                 content = record.get("content", "")
                 if content:
+                    indented = content.replace("\n", "\n  ")
                     console.print()
-                    console.print(content, highlight=False, markup=False)
+                    console.print("[bold white]⏺[/bold white] ", end="")
+                    console.print(indented, highlight=False, markup=False)
                     console.print()
-            elif role == "tool":
-                name = record.get("name", "?")
-                content = truncate(record.get("content", ""), 120)
-                console.print(f"  [green]✓[/green] [dim]{name} → {content}[/dim]")
 
         elif rtype == "thought":
             text = record.get("text", "")
@@ -313,13 +310,20 @@ def _render_resumed_history(console: Console, records: list[dict]) -> None:
             args = record.get("arguments", {})
             display = TOOL_DISPLAY.get(name, name)
             file_path = args.get("file_path")
+            status = record.get("status", "")
+
+            # 向后看：找到对应的 tool_complete 确定颜色
+            # 回放时无法提前知道状态，先用默认绿色，由 tool_complete 独立渲染状态
+            dot_style = "bold green"
 
             if file_path:
-                console.print(f"\n  [bold cyan]⏺ {display}[/bold cyan]({file_path})")
+                console.print(
+                    f"\n[{dot_style}]⏺[/{dot_style}] [bold]{display}[/bold]({file_path})"
+                )
             else:
                 args_brief = ", ".join(f"{k}={truncate(v)}" for k, v in args.items())
                 console.print(
-                    f"\n  [bold cyan]⏺ {display}[/bold cyan]"
+                    f"\n[{dot_style}]⏺[/{dot_style}] [bold]{display}[/bold]"
                     f"[dim]({args_brief})[/dim]"
                 )
 
@@ -352,20 +356,15 @@ def _render_resumed_history(console: Console, records: list[dict]) -> None:
         elif rtype == "tool_complete":
             name = record.get("tool_name", "?")
             status = record.get("status", "")
-            had_diff = record.get("had_diff", False)
+            display = record.get("display", "")
+            error_msg = record.get("error_msg", "")
 
-            if had_diff:
-                if status == "error":
-                    err = record.get("error_msg", "unknown")
-                    console.print(f"  [red]✗[/red] [dim]{name} 失败: {err}[/dim]")
-            elif status == "success":
-                result_preview = truncate(record.get("result", ""), 120)
-                console.print(f"  [green]✓[/green] [dim]{name} → {result_preview}[/dim]")
-            elif status == "error":
-                err = record.get("error_msg", "unknown")
-                console.print(f"  [red]✗[/red] [dim]{name} 失败: {err}[/dim]")
+            if status == "error":
+                console.print(f"  [red]{error_msg or 'Error'}[/red]")
             elif status == "cancelled":
-                console.print(f"  [yellow]⊘[/yellow] [dim]{name} 已取消[/dim]")
+                console.print(f"  [yellow]已取消[/yellow]")
+            elif display:
+                console.print(f"  [dim]{display}[/dim]")
 
     console.print()
     console.print("  [dim]─── 继续对话 ───[/dim]")
