@@ -1,10 +1,9 @@
 # MT-Agent
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
-![LangGraph](https://img.shields.io/badge/LangGraph-1.13%2B-0F172A)
-![LangChain](https://img.shields.io/badge/LangChain-1.2.13%2B-1C3C3C)
+![Python](https://img.shields.io/badge/Python-3.10%2B-1982c4?logo=python&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-1.13%2B-8ac926)
 ![uv](https://img.shields.io/badge/uv-0.7.6-DE5FE9)
-![Next.js](https://img.shields.io/badge/Docs-Next.js-000000?logo=nextdotjs&logoColor=white)
+![Next.js](https://img.shields.io/badge/Docs-Next.js-ffca3a?logo=nextdotjs&logoColor=white)
 
 ![banner](docs/imgs/banner.png)
 
@@ -45,6 +44,16 @@ uv run python app.py
 ```
 
 ## 调试方法
+
+### 日志
+
+支持显示日志
+
+```bash
+uv run app.py --log-level [DEBUG|INFO|WARNING|ERROR]
+```
+
+### LangSmith
 
 用`LangSmith`检查结点运行状态
 

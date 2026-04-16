@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Callable
 
 from langchain_core.messages import ToolMessage
@@ -26,12 +27,18 @@ def create_event_bus_wrapper(event_bus: EventBus) -> Callable:
         call_id = tc["id"]
 
         # ── executing ──
+        start_time = time.time()
+        logger.info(f"[{tool_name}] 开始执行")
+
         event_bus.emit(AgentEvent(
             type=EventType.TOOL_STATE_UPDATE,
             data={"call_id": call_id, "tool_name": tool_name, "status": "executing"},
         ))
 
         result = execute(request)
+
+        elapsed = time.time() - start_time
+        logger.info(f"[{tool_name}] 完成，耗时 {elapsed:.3f}s")
 
         # ── 从 ToolMessage 提取结果信息 ──
         status = "success"

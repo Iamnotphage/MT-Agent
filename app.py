@@ -68,10 +68,25 @@ class App:
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=os.environ.get("LOG_LEVEL", "WARNING").upper(),
-        format="%(name)s %(levelname)s: %(message)s",
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="MT-Agent")
+    parser.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "WARNING").upper(),
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="日志级别 (默认: WARNING，使用 INFO 查看工具执行日志)",
     )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="[%(asctime)s.%(msecs)03d] [%(name)s] %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stderr,
+    )
+
     app = App()
     try:
         app.run()
