@@ -9,7 +9,8 @@
 
 ---
 
-Coding Agent for MT-3000
+> [!IMPORTANT]
+> Coding Agent for MT-3000
 
 ## 项目介绍
 
@@ -37,7 +38,6 @@ MODEL_NAME=YOUR_MODEL_NAME
 先安装好`uv`
 
 ```bash
-# version 0.3.0
 git checkout develop
 uv sync
 uv run python app.py

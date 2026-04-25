@@ -9,7 +9,7 @@
 
 ### 1. 静态 Context
 
-由 [`core/context.py`](../core/context.py) 管理，分为两层：
+由 [`core/context/manager.py`](../core/context/manager.py) 管理，分为两层：
 
 - Tier 1: 全局 `CONTEXT.md`
   注入到 system prompt，适合放全局规则、长期偏好、Agent memory。
@@ -113,7 +113,7 @@
 
 `session_context` 只在第一轮作为一条额外的 `HumanMessage` 注入。
 
-它由 [`core/context.py`](../core/context.py) 中的 `build_session_context()` 构建，当前包含：
+它由 [`core/context/manager.py`](../core/context/manager.py) 中的 `build_session_context()` 构建，当前包含：
 
 - Today's date
 - OS
@@ -146,7 +146,7 @@
 
 实现位于：
 
-- [`core/compressor.py`](../core/compressor.py)
+- [`core/context/compressor.py`](../core/context/compressor.py)
 - [`core/nodes/reasoning.py`](../core/nodes/reasoning.py)
 
 ### 1. 何时触发
@@ -208,7 +208,10 @@
 
 ## 2. Memory
 
-memory 也由 [`core/context.py`](../core/context.py) 管理，目前是最简单的持久化 facts 方案：
+memory 由 [`core/memory/manager.py`](../core/memory/manager.py) 管理，
+runtime 在组装阶段把它与 [`core/context/manager.py`](../core/context/manager.py) 的
+全局 context 缓存刷新回调连接起来，
+目前是最简单的持久化 facts 方案：
 
 - 存储位置：全局 `CONTEXT.md` 的 `## Agent Memories` 区域
 - 写入方式：追加 markdown list item

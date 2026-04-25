@@ -11,12 +11,12 @@
 ```
   ┌───────────────────────────────┐
   │           CLI 层               │  用户看到什么
-  │      交互、渲染、命令            │
+  │      交互、订阅事件、渲染、命令    │
   ├───────────┬───────────────────┤
   │           │  EventBus          │  层间如何通信
   │           ↕                    │
   │          Core 层               │  Agent 如何思考
-  │    ReAct 循环、LLM、状态       │
+  │    ReAct 循环、LLM、Session、Context、Memory│
   ├───────────┬───────────────────┤
   │           │  Registry          │  工具如何接入
   │           ↓                    │
@@ -25,11 +25,7 @@
   └───────────────────────────────┘
 ```
 
-每一层只知道自己的下一层，不知道自己的上一层。这意味着：
-
-- **替换 CLI 不影响 Core** — 可以换成 Web UI、API 服务，Core 层无感知
-- **替换 LLM 不影响工具** — 从 DeepSeek 换到 GPT，工具层无需改动
-- **新增工具不影响循环** — 注册一个新工具，ReAct 循环自动可用
+各个层级之间隔离，CLI层通过`EventBus`与Core层交互，Core层通过`ToolRegistry`与Tools层交互
 
 ### 2. 事件驱动
 
@@ -43,7 +39,7 @@ Core 节点执行中 ──emit──> EventBus ──callback──> CLI 实时
 
 详见 → [EventBus.md](./EventBus.md)
 
-### 3. ReAct 循环：思考 → 行动 → 观察
+### 3. ReAct 循环
 
 Agent 的核心智能来自 **ReAct (Reasoning + Acting)** 模式，用 LangGraph 状态图实现：
 
