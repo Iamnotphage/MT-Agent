@@ -4,15 +4,14 @@ from __future__ import annotations
 
 from rich.console import Console
 
-from cli.utils.text import PROMPT_STYLE
-from core.context import ContextManager
+from core.memory import MemoryManager
 
 
-def cmd_memory(console: Console, cm: ContextManager, args: list[str]) -> None:
+def cmd_memory(console: Console, mm: MemoryManager, args: list[str]) -> None:
     sub = args[0] if args else "list"
 
     if sub == "list":
-        memories = cm.get_memories()
+        memories = mm.get_memories()
         if not memories:
             console.print("  [dim]暂无记忆。使用 /memory add <fact> 添加。[/dim]")
             return
@@ -28,7 +27,9 @@ def cmd_memory(console: Console, cm: ContextManager, args: list[str]) -> None:
         if not fact:
             console.print("  [red]用法:[/red] /memory add <要记住的内容>")
             return
-        cm.save_memory(fact)
+        if mm.save_memory(fact) is None:
+            console.print("  [red]✗[/red] 记忆内容不能为空")
+            return
         console.print(f"  [green]✓[/green] 已保存记忆: {fact}")
 
     elif sub == "remove":
@@ -40,7 +41,8 @@ def cmd_memory(console: Console, cm: ContextManager, args: list[str]) -> None:
         except ValueError:
             console.print("  [red]序号必须是数字[/red]")
             return
-        if cm.remove_memory(idx):
+        ok, _ = mm.remove_memory(idx)
+        if ok:
             console.print(f"  [green]✓[/green] 已删除第 {idx + 1} 条记忆")
         else:
             console.print(f"  [red]✗[/red] 序号 {idx + 1} 不存在")

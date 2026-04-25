@@ -1,9 +1,8 @@
-import asyncio
-
 import pytest
 
-from tools.base import BaseTool, ToolResult, ToolRiskLevel
-from tools.registry import ToolRegistry
+from langchain_core.tools.base import ToolException
+
+from tools.base import BaseTool, ToolRiskLevel
 from tools.file_ops.read_file import ReadFileTool
 
 
@@ -22,88 +21,45 @@ class TestReadFileTool:
     def tool(self, workspace):
         return ReadFileTool(workspace=workspace)
 
-    def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
-
     def test_read_full_file(self, tool):
-        r = self._run(tool.execute(file_path="hello.txt"))
-        assert r.success
-        assert "line1" in r.output
-        assert "line2" in r.output
-        assert r.metadata["total_lines"] == 3
+        content, artifact = tool._run(file_path="hello.txt")
+        assert "line1" in content
+        assert "line2" in content
+        assert artifact["total_lines"] == 3
 
     def test_read_line_range(self, tool):
-        r = self._run(tool.execute(file_path="hello.txt", start_line=2, end_line=2))
-        assert r.success
-        assert "line2" in r.output
-        assert "line1" not in r.output
+        content, artifact = tool._run(file_path="hello.txt", start_line=2, end_line=2)
+        assert "line2" in content
+        assert "line1" not in content
 
     def test_read_subdir(self, tool):
-        r = self._run(tool.execute(file_path="sub/deep.c"))
-        assert r.success
-        assert "int main" in r.output
+        content, artifact = tool._run(file_path="sub/deep.c")
+        assert "int main" in content
 
     def test_file_not_found(self, tool):
-        r = self._run(tool.execute(file_path="nope.txt"))
-        assert not r.success
-        assert "不存在" in r.error
+        with pytest.raises(ToolException, match="不存在"):
+            tool._run(file_path="nope.txt")
 
     def test_path_traversal_blocked(self, tool):
-        r = self._run(tool.execute(file_path="../../etc/passwd"))
-        assert not r.success
-        assert "越界" in r.error
+        with pytest.raises(ToolException, match="越界"):
+            tool._run(file_path="../../etc/passwd")
 
     def test_truncation(self, workspace):
         big = "\n".join(f"L{i}" for i in range(1000))
         (workspace / "big.txt").write_text(big)
         tool = ReadFileTool(workspace=workspace)
-        r = self._run(tool.execute(file_path="big.txt"))
-        assert r.success
-        assert r.metadata["truncated"] is True
-        assert "truncated" in r.output
+        content, artifact = tool._run(file_path="big.txt")
+        assert artifact["truncated"] is True
+        assert "truncated" in content
 
-    def test_schema_shape(self, tool):
-        s = tool.schema
-        assert s["type"] == "function"
-        assert s["function"]["name"] == "read_file"
-        assert "file_path" in s["function"]["parameters"]["properties"]
+    def test_invoke_via_langchain(self, tool):
+        """langchain invoke 接口可用"""
+        result = tool.invoke({"file_path": "hello.txt"})
+        assert "line1" in result
 
+    def test_tool_has_name_and_description(self, tool):
+        assert tool.name == "read_file"
+        assert len(tool.description) > 0
 
-# ── ToolRegistry ─────────────────────────────────────────────────
-
-class TestToolRegistry:
-
-    @pytest.fixture()
-    def registry(self, tmp_path):
-        reg = ToolRegistry()
-        reg.register(ReadFileTool(workspace=tmp_path))
-        return reg
-
-    def test_register_and_lookup(self, registry):
-        assert "read_file" in registry
-        assert registry.get("read_file") is not None
-        assert len(registry) == 1
-
-    def test_schemas_list(self, registry):
-        schemas = registry.schemas
-        assert len(schemas) == 1
-        assert schemas[0]["function"]["name"] == "read_file"
-
-    def test_execute_unknown_tool(self, registry):
-        r = asyncio.get_event_loop().run_until_complete(
-            registry.execute("no_such_tool", {})
-        )
-        assert not r.success
-        assert "未知工具" in r.error
-
-    def test_execute_with_validation(self, registry, tmp_path):
-        (tmp_path / "a.txt").write_text("hello")
-        r = asyncio.get_event_loop().run_until_complete(
-            registry.execute("read_file", {"file_path": "a.txt"})
-        )
-        assert r.success
-        assert "hello" in r.output
-
-    def test_needs_confirmation(self, registry):
-        assert registry.needs_confirmation("read_file") is False
-        assert registry.needs_confirmation("unknown") is True
+    def test_risk_level(self, tool):
+        assert tool.risk_level == ToolRiskLevel.LOW

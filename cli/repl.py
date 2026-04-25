@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from langgraph.types import Command
@@ -27,6 +28,7 @@ from cli.utils.text import (
     PROMPT_STYLE,
     PROMPT_SYMBOL,
     RISK_STYLE,
+    display_width,
     ljust_cols,
     truncate,
 )
@@ -46,6 +48,7 @@ class Repl:
         self._closed = False
         self._history = InMemoryHistory()
         self._token_limit = CONTEXT_CONFIG.get("token_limit", 65536)
+        self._working_dir = Path(runtime.context_manager._working_dir)
 
         # 事件处理（渲染 + 录制）
         self._stream = StreamHandler(
@@ -97,8 +100,11 @@ class Repl:
 
         config = {"configurable": {"thread_id": self.thread_id}}
         state_input: dict | Command = {
-            "message": [HumanMessage(content=user_input)],
+            "messages": [HumanMessage(content=user_input)],
         }
+
+        # 启动思考动画
+        self._stream.start_thinking()
 
         try:
             self.runtime.graph.invoke(state_input, config)
@@ -288,7 +294,7 @@ class Repl:
             case "/context":
                 cmd_context(self.console, self.runtime.context_manager, parts[1:])
             case "/memory":
-                cmd_memory(self.console, self.runtime.context_manager, parts[1:])
+                cmd_memory(self.console, self.runtime.memory_manager, parts[1:])
             case _:
                 self.console.print(f"  [red]未知命令:[/red] {cmd}")
                 self.console.print("  [dim]输入 /help 查看可用命令[/dim]")
@@ -320,20 +326,54 @@ class Repl:
     # ── 上下文状态 ─────────────────────────────────────────────
 
     def _context_status(self) -> str:
-        """返回上下文占比文本，如 '42%' 或空字符串。"""
-        last = self.runtime.session.stats.last_input_tokens
+        """返回上下文状态文本，格式: '{model_name} · {剩余百分比}% left · {工作目录}'。"""
+        stats = self.runtime.session.stats
+        model = stats.model or "unknown"
+        last = stats.last_input_tokens
+
         if last <= 0:
-            return ""
-        pct = min(last / self._token_limit * 100, 100)
-        return f"{pct:.0f}%"
+            remaining_pct = 100
+        else:
+            remaining_pct = max(int((1 - last / self._token_limit) * 100), 0)
+
+        # 获取工作目录完整路径，如果在 home 目录下则用 ~ 替换
+        working_dir = str(self._working_dir)
+        home = str(Path.home())
+        if working_dir.startswith(home):
+            working_dir = "~" + working_dir[len(home):]
+
+        return f"{model} · {remaining_pct}% left · {working_dir}"
 
     # ── 渲染辅助 ─────────────────────────────────────────────────
 
     def _render_user_input(self, user_input: str) -> None:
         """用灰色背景重新渲染用户输入行"""
-        sys.stdout.write("\x1b[A\x1b[2K\r")
+        # 计算输入实际占用的行数（考虑换行和自动折行）
+        lines = user_input.split('\n')
+        total_input_lines = 0
+        for line in lines:
+            content = f"{PROMPT_SYMBOL} {line}"
+            # 计算这一行需要多少终端行（考虑自动折行）
+            line_width = display_width(content)
+            total_input_lines += max(1, (line_width + self.console.width - 1) // self.console.width)
+
+        # 需要清除的行数：上分界线(1) + 输入行(N) + 下分界线(1) + 状态栏(1，如果有)
+        lines_to_clear = 1 + total_input_lines + 1
+        if self._context_status():  # 如果有状态栏
+            lines_to_clear += 1
+
+        # 向上移动并清除所有行
+        for _ in range(lines_to_clear):
+            sys.stdout.write("\x1b[A\x1b[2K")
+        sys.stdout.write("\r")
         sys.stdout.flush()
-        line = Text(no_wrap=True)
-        content = f"{PROMPT_SYMBOL} {user_input}"
-        line.append(ljust_cols(content, self.console.width), style=BG_USER)
-        self.console.print(line)
+
+        # 渲染用户输入（支持多行，每行都有背景色）
+        for i, line in enumerate(lines):
+            text = Text(no_wrap=True)
+            if i == 0:
+                content = f"{PROMPT_SYMBOL} {line}"
+            else:
+                content = f"  {line}"  # 续行缩进
+            text.append(ljust_cols(content, self.console.width), style=BG_USER)
+            self.console.print(text)

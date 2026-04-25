@@ -21,7 +21,7 @@
 
 ### 1.1 JSONL transcript
 
-由 [`core/session.py`](../core/session.py) 中的 `SessionRecorder` 负责。
+由 [`core/session/recorder.py`](../core/session/recorder.py) 中的 `SessionRecorder` 负责。
 
 保存路径：
 
@@ -110,7 +110,7 @@ session 文件中主要包含：
 
 ## 3. 长会话如何压缩
 
-历史压缩由 [`core/compressor.py`](../core/compressor.py) 和 [`core/nodes/reasoning.py`](../core/nodes/reasoning.py) 负责。
+历史压缩由 [`core/context/compressor.py`](../core/context/compressor.py) 和 [`core/nodes/reasoning.py`](../core/nodes/reasoning.py) 负责。
 
 触发条件：
 
@@ -266,4 +266,3 @@ Session、Context、Memory 在当前项目中的职责边界如下：
   跨会话持久化的长期 facts
 - Session
   当前会话产生的历史、压缩摘要、恢复状态、checkpoint
-

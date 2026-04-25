@@ -4,7 +4,7 @@ import pytest
 from langchain_core.messages import AIMessageChunk, HumanMessage
 
 from core.event_bus import EventType
-from core.compressor import ContextCompressor
+from core.context.compressor import ContextCompressor
 from core.session import SessionStats
 from core.nodes.reasoning import create_reasoning_node, should_use_tools
 
@@ -16,7 +16,7 @@ class TestReasoningNode:
         """LLM 返回纯文本 → pending_tool_calls 为空"""
         node = create_reasoning_node(mock_llm_text, event_bus)
         state = {
-            "message": [HumanMessage(content="你好")],
+            "messages": [HumanMessage(content="你好")],
             "turn_count": 0,
         }
 
@@ -24,13 +24,13 @@ class TestReasoningNode:
 
         assert result["turn_count"] == 1
         assert result["pending_tool_calls"] == []
-        assert "你好" in result["message"][0].content
+        assert "你好" in result["messages"][0].content
 
     def test_tool_call_response(self, event_bus, mock_llm_tool_call):
         """LLM 返回 tool_calls → pending_tool_calls 非空"""
         node = create_reasoning_node(mock_llm_tool_call, event_bus)
         state = {
-            "message": [HumanMessage(content="读取 test.c")],
+            "messages": [HumanMessage(content="读取 test.c")],
             "turn_count": 0,
         }
 
@@ -44,7 +44,7 @@ class TestReasoningNode:
     def test_turn_count_increments(self, event_bus, mock_llm_text):
         """turn_count 从任意值递增"""
         node = create_reasoning_node(mock_llm_text, event_bus)
-        state = {"message": [HumanMessage(content="hi")], "turn_count": 5}
+        state = {"messages": [HumanMessage(content="hi")], "turn_count": 5}
 
         result = node(state)
         assert result["turn_count"] == 6
@@ -55,7 +55,7 @@ class TestReasoningNode:
         event_bus.subscribe_all(lambda e: received.append(e))
 
         node = create_reasoning_node(mock_llm_text, event_bus)
-        state = {"message": [HumanMessage(content="hi")], "turn_count": 0}
+        state = {"messages": [HumanMessage(content="hi")], "turn_count": 0}
         node(state)
 
         content_events = [e for e in received if e.type == EventType.CONTENT]
@@ -69,7 +69,7 @@ class TestReasoningNode:
         event_bus.subscribe(EventType.TOOL_CALL_REQUEST, lambda e: received.append(e))
 
         node = create_reasoning_node(mock_llm_tool_call, event_bus)
-        state = {"message": [HumanMessage(content="hi")], "turn_count": 0}
+        state = {"messages": [HumanMessage(content="hi")], "turn_count": 0}
         node(state)
 
         assert len(received) == 1
@@ -82,7 +82,7 @@ class TestReasoningNode:
         event_bus.subscribe(EventType.TURN_START, lambda e: received.append(e))
 
         node = create_reasoning_node(mock_llm_text, event_bus)
-        state = {"message": [HumanMessage(content="hi")], "turn_count": 0}
+        state = {"messages": [HumanMessage(content="hi")], "turn_count": 0}
         node(state)
 
         assert len(received) == 1
@@ -94,7 +94,7 @@ class TestReasoningNode:
         event_bus.subscribe(EventType.TRANSCRIPT_MESSAGE, lambda e: received.append(e))
 
         node = create_reasoning_node(mock_llm_tool_call, event_bus)
-        state = {"message": [HumanMessage(content="hi")], "turn_count": 0}
+        state = {"messages": [HumanMessage(content="hi")], "turn_count": 0}
         node(state)
 
         assert len(received) == 1
@@ -108,7 +108,7 @@ class TestReasoningNode:
         llm.stream.side_effect = Exception("API timeout")
 
         node = create_reasoning_node(llm, event_bus)
-        state = {"message": [HumanMessage(content="hi")], "turn_count": 0}
+        state = {"messages": [HumanMessage(content="hi")], "turn_count": 0}
 
         with pytest.raises(Exception, match="API timeout"):
             node(state)
@@ -123,31 +123,32 @@ class TestReasoningNode:
         llm.stream.side_effect = RuntimeError("connection refused")
 
         node = create_reasoning_node(llm, event_bus)
-        state = {"message": [HumanMessage(content="hi")], "turn_count": 0}
+        state = {"messages": [HumanMessage(content="hi")], "turn_count": 0}
         with pytest.raises(RuntimeError, match="connection refused"):
             node(state)
 
         assert len(received) == 1
         assert "connection refused" in received[0].data["error"]
 
-    def test_no_tool_schemas_skips_bind(self, event_bus):
-        """tool_schemas=None 时不调用 bind_tools"""
+    def test_no_tools_skips_bind(self, event_bus):
+        """tools=None 时不调用 bind_tools"""
         llm = MagicMock()
         llm.stream.return_value = iter([AIMessageChunk(content="ok")])
 
-        create_reasoning_node(llm, event_bus, tool_schemas=None)
+        create_reasoning_node(llm, event_bus, tools=None)
 
         llm.bind_tools.assert_not_called()
 
-    def test_with_tool_schemas_calls_bind(self, event_bus):
-        """传入 tool_schemas 时调用 bind_tools"""
+    def test_with_tools_calls_bind(self, event_bus):
+        """传入 tools 时调用 bind_tools"""
         llm = MagicMock()
         llm.bind_tools.return_value = llm
-        schemas = [{"type": "function", "function": {"name": "test", "parameters": {}}}]
+        from tools.file_ops.read_file import ReadFileTool
+        tool_list = [ReadFileTool(workspace="/tmp")]
 
-        create_reasoning_node(llm, event_bus, tool_schemas=schemas)
+        create_reasoning_node(llm, event_bus, tools=tool_list)
 
-        llm.bind_tools.assert_called_once_with(schemas)
+        llm.bind_tools.assert_called_once_with(tool_list)
 
     def test_compression_applies_on_current_turn(self, event_bus):
         """触发压缩时，当轮发送给 LLM 的消息应使用摘要后的历史。"""
@@ -172,7 +173,7 @@ class TestReasoningNode:
             compressor=compressor,
         )
         state = {
-            "message": [
+            "messages": [
                 HumanMessage(content="u1", id="m1"),
                 HumanMessage(content="u2", id="m2"),
                 HumanMessage(content="u3", id="m3"),
@@ -187,9 +188,9 @@ class TestReasoningNode:
         assert "conversation_history_summary" in streamed_messages[1].content
         assert streamed_messages[2].content == "u3"
         assert streamed_messages[3].content == "u4"
-        assert result["message"][0].id == "m1"
-        assert result["message"][1].id == "m2"
-        assert "conversation_history_summary" in result["message"][2].content
+        assert result["messages"][0].id == "m1"
+        assert result["messages"][1].id == "m2"
+        assert "conversation_history_summary" in result["messages"][2].content
 
 
 class TestShouldUseTools:

@@ -4,7 +4,7 @@
 
 对标 gemini-cli 的 `confirmation-bus/message-bus.ts`。
 
-## 为什么需要 EventBus
+## EventBus作用
 
 LangGraph 节点在 `graph.invoke()` 内部执行，CLI 层无法直接介入。EventBus 让节点在执行过程中**同步推送事件**，CLI 层通过订阅实时渲染，无需轮询、不破坏分层。
 
@@ -23,7 +23,7 @@ Core 层 (生产者)                    CLI 层 (消费者)
 ```python
 bus = EventBus()
 
-# 订阅指定事件
+# 订阅指定事件，一旦接收到事件，执行callback
 bus.subscribe(EventType.CONTENT, callback)
 
 # 订阅所有事件（通配）
@@ -84,6 +84,7 @@ class AgentEvent:
 | `SESSION_END` | — | — | 会话结束（预留） |
 | `ERROR` | reasoning | `{"error": str, "source": str}` | 运行时错误 |
 | `CONTEXT_COMPRESSED` | — | — | 上下文被压缩（预留） |
+| `TRANSCRIPT_MESSAGE` | - | - | 用于记录canonical transcript，供session恢复 |
 
 ## 一次完整调用的事件流
 
@@ -104,15 +105,22 @@ TURN_START           ← reasoning: turn=2
 
 ## CLI 层订阅示例
 
-`cli/repl.py` 中的实际订阅（5 种事件）：
+`cli/event_handlers/stream.py` 中的实际订阅：
 
 ```python
-bus.subscribe(EventType.CONTENT,            self._on_content)
-bus.subscribe(EventType.THOUGHT,            self._on_thought)
-bus.subscribe(EventType.TOOL_CALL_REQUEST,  self._on_tool_request)
-bus.subscribe(EventType.TOOL_CALL_COMPLETE, self._on_tool_complete)
-bus.subscribe(EventType.ERROR,              self._on_error)
+event_bus.subscribe(EventType.CONTENT,            self.on_content)
+event_bus.subscribe(EventType.THOUGHT,            self.on_thought)
+event_bus.subscribe(EventType.TOOL_CALL_REQUEST,  self.on_tool_request)
+event_bus.subscribe(EventType.TOOL_CALL_COMPLETE, self.on_tool_complete)
+event_bus.subscribe(EventType.TOOL_LIVE_OUTPUT,   self.on_tool_live_output)
+event_bus.subscribe(EventType.CONTEXT_COMPRESSED, self.on_context_compressed)
+event_bus.subscribe(EventType.APPROVAL_REQUEST,   self.on_approval_request)
+event_bus.subscribe(EventType.APPROVAL_RESPONSE,  self.on_approval_response)
+event_bus.subscribe(EventType.ERROR,              self.on_error)
+event_bus.subscribe(EventType.TRANSCRIPT_MESSAGE, self.on_transcript_message)
 ```
+
+这些订阅事件主要是用于流式输出渲染
 
 ## 设计要点
 

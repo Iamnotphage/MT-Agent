@@ -11,7 +11,15 @@ from typing import Any
 PROMPT_STYLE = "#847ACE"
 PROMPT_SYMBOL = "❯"
 RISK_STYLE = {"low": "green", "medium": "yellow", "high": "red bold"}
-TOOL_DISPLAY = {"write_file": "Write", "read_file": "Read", "ls": "Ls"}
+TOOL_DISPLAY = {
+    "read_file": "Read",
+    "write_file": "Write",
+    "edit_file": "Edit",
+    "ls": "Ls",
+    "glob": "Glob",
+    "grep": "Grep",
+    "save_memory": "Memory",
+}
 BG_USER = "on #252530"
 
 COMMANDS = [

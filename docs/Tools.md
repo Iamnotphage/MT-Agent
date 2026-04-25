@@ -7,8 +7,7 @@
 ```
 tools/
 ├── __init__.py              # 导出 + create_default_tools() 集中注册
-├── base.py                  # BaseTool 抽象基类、ToolResult、ToolRiskLevel
-├── registry.py              # ToolRegistry — 注册 / 查找 / schema / 执行
+├── base.py                  # 重导出 langchain BaseTool + ToolRiskLevel
 ├── policy.py                # 风险等级映射表（供 tool_routing 查表）
 ├── agent_ops/
 │   ├── __init__.py
@@ -25,6 +24,47 @@ tools/
 
 ## 核心概念
 
+### BaseTool
+
+项目工具现在直接基于 `langchain_core.tools.BaseTool`：
+
+- `tools.base.BaseTool` 是对 LangChain `BaseTool` 的重导出，工具实现天然兼容 `llm.bind_tools()` 和 `langgraph.prebuilt.ToolNode`
+- `ToolRiskLevel` 是项目侧补充的风险等级声明，用于 `tool_routing` 判断是否需要人工审批
+- 工具通过 `response_format="content_and_artifact"` 返回双通道结果：`content` 给 LLM/ToolMessage，`artifact` 给 CLI/EventBus 展示富数据
+
+子类直接实现 LangChain 标准的 `_run()` 方法：
+- 成功时返回 `(content, artifact)` 元组，其中 `content` 是 LLM 看到的文本，`artifact` 是结构化展示数据
+- 失败时抛出 `ToolException`，`ToolNode(handle_tool_errors=True)` 会把异常转换为 error `ToolMessage`
+- `artifact` 会进入 `ToolMessage.artifact`，再由 `ToolNode` wrapper 读取并发送 EventBus 事件
+
+```python
+from pathlib import Path
+from pydantic import BaseModel, Field
+
+from langchain_core.tools.base import ToolException
+from tools.base import BaseTool, ToolRiskLevel
+
+
+class MyToolArgs(BaseModel):
+    file_path: str = Field(description="目标文件路径（相对于工作区）")
+
+
+class MyTool(BaseTool):
+    name: str = "my_tool"
+    description: str = "..."
+    risk_level: ToolRiskLevel = ToolRiskLevel.LOW
+    response_format: str = "content_and_artifact"
+    args_schema: type = MyToolArgs
+    workspace: Path = Field(default_factory=lambda: Path.cwd())
+
+    def _run(self, *, file_path: str) -> tuple[str, dict]:
+        ...
+        return (
+            "LLM 看到的工具结果文本",
+            {"display": "CLI 展示摘要", "metadata_key": "结构化富数据"},
+        )
+```
+
 ### ToolRiskLevel — 风险等级
 
 决定工具调用是否需要用户确认：
@@ -37,78 +77,22 @@ tools/
 
 风险等级有两个来源，**工具自身声明**（`BaseTool.risk_level` 属性）和 **全局策略表**（`policy.py` 中的 `DEFAULT_TOOL_RISK`）。`tool_routing` 节点在路由时查表决定走自动执行还是人工审批。
 
-### ToolResult — 执行结果
+### Tool 输出格式
 
-每次工具执行统一返回 `ToolResult`，面向两个消费方：
-
-```python
-@dataclass
-class ToolResult:
-    output: str                        # → LLM 看到的文本
-    display: str = ""                  # → CLI 展示给用户的摘要
-    error: str | None = None           # → 非 None 表示失败
-    metadata: dict[str, Any] = {}      # → 结构化富数据（如 DiffResult）
-```
-
-- `output` 会被转成 `ToolMessage.content`，回写到消息历史供 LLM 下一轮推理
-- `metadata` 不进入消息历史，而是通过 EventBus 推送给 CLI 层做渲染（如 diff 彩色展示）
-
-### ToolCallInfo — 调用状态
-
-一次工具调用在 ReAct 循环中的完整生命周期：
-
-```mermaid
-stateDiagram-v2
-    [*] --> pending: LLM emits tool call
-    pending --> awaiting_approval: medium/high risk
-    pending --> executing: low risk or approved
-    awaiting_approval --> pending: approved
-    awaiting_approval --> cancelled: denied
-    executing --> success: tool completed
-    executing --> error: tool failed
-    executing --> interrupted: process interrupted / recovery handoff
-    interrupted --> pending: explicit retry in recovery phase
-    interrupted --> cancelled: explicit cancel in recovery phase
-    success --> [*]
-    error --> [*]
-    cancelled --> [*]
-    interrupted --> [*]: checkpoint persisted, waiting for recovery
-```
+当前工具统一使用 LangChain 的 `content_and_artifact` 输出格式，面向两个消费方：
 
 ```python
-class ToolCallInfo(TypedDict):
-    call_id: str
-    tool_name: str
-    arguments: dict
-    status: Literal[
-        "pending",
-        "awaiting_approval",
-        "executing",
-        "success",
-        "error",
-        "cancelled",
-        "interrupted",
-    ]
-    result: str | None
-    error_msg: str | None
+def _run(...) -> tuple[str, dict]:
+    return (
+        "content: 写入 ToolMessage.content，LLM 下一轮可以看到",
+        {
+            "display": "CLI 展示摘要",
+            "diff": diff,  # 可选：EventBus wrapper 会作为 TOOL_LIVE_OUTPUT 推送
+        },
+    )
 ```
 
-各状态的当前语义：
-
-| 状态 | 含义 | 自动恢复策略 |
-|------|------|--------------|
-| `pending` | 等待执行 | 可继续执行 |
-| `awaiting_approval` | 等待用户审批 | 恢复后必须重新确认 |
-| `executing` | 正在执行 | 不应跨进程长期停留，恢复阶段会转义为 `interrupted` |
-| `success` | 已成功完成 | 绝不自动重跑 |
-| `error` | 已执行失败 | 保留结果，不自动重跑 |
-| `cancelled` | 被用户拒绝或取消 | 绝不自动重跑 |
-| `interrupted` | 执行过程中被打断，结果不可信 | 等待恢复策略决定重试或取消 |
-
-边界说明：
-
-- 若 CLI 中断时工具仍处于 `awaiting_approval`，恢复后重新请求确认。
-- 若用户已确认，但 CLI 在工具完成前中断，恢复时不再重新审批，而是按 `interrupted` 处理。
+`content` 应该足够自解释，适合模型继续推理；`artifact` 则用于用户界面和结构化数据，不应成为模型理解任务结果的唯一来源。
 
 ## 调用链路
 
@@ -126,24 +110,20 @@ tool_routing_node
   ▼
 human_approval_node（仅 MEDIUM/HIGH 走此节点）
   │  LangGraph interrupt → CLI 渲染确认对话框
-  │  用户批准 → "pending"  /  用户拒绝 → "cancelled"
+  │  用户批准 → 放行  /  用户拒绝 → 生成 rejection ToolMessage
   ▼
-tool_execution_node
-  │  筛选 status=="pending" 的调用
-  │  executor(tool_name, arguments) → ToolResult
-  │  → 写入 state.completed_tool_calls
-  ▼
-observation_node
-  │  completed_tool_calls → ToolMessage 回写消息历史
-  │  清空 pending / completed（瞬态缓冲区）
+tools 节点 (langgraph.prebuilt.ToolNode)
+  │  自动并行执行所有工具调用
+  │  tool._run(**args) → 生成 ToolMessage 并回写 state.messages
+  │  EventBus wrapper 在执行前后发送状态事件
   ▼
 reasoning_node（下一轮，LLM 看到 ToolMessage 决定继续或结束）
 ```
 
-说明：
-
-- 当前代码路径已经正式支持 `interrupted` 作为工具调用状态的一部分。
-- `interrupted` 的真正恢复处理属于 Phase 3 后续步骤；P3-1 先完成状态定义和文档收口。
+新版链路里已经没有独立的 `tool_execution` 和 `observation` 节点：
+- 旧 `tool_execution` 的“查找工具、执行工具、并行调度、错误转 ToolMessage”职责由 `ToolNode` 接管
+- 旧 `observation` 的“把结果追加为 ToolMessage”职责也由 `ToolNode` 接管
+- `pending_tool_calls` 仍然保留，但只作为 `tool_routing` / `human_approval` 的审批元数据，不再承载工具执行结果
 
 ## 新增工具
 
@@ -161,47 +141,62 @@ class MyToolArgs(BaseModel):
 
 ### Step 2: 实现工具类
 
-继承 `BaseTool`，设置四个类属性，实现 `execute()` 方法：
+继承 `BaseTool`，设置类属性，实现 `_run()` 方法：
 
 ```python
-from tools.base import BaseTool, ToolResult, ToolRiskLevel
+import os
+from pathlib import Path
+from typing import Any
+
+from langchain_core.tools.base import ToolException
+from pydantic import Field
+
+from tools.base import BaseTool, ToolRiskLevel
 
 class MyTool(BaseTool):
-    name = "my_tool"
-    description = "这段描述会被 LLM 看到，直接影响 LLM 何时选择此工具"
-    risk_level = ToolRiskLevel.LOW
-    args_schema = MyToolArgs
+    name: str = "my_tool"
+    description: str = "这段描述会被 LLM 看到，直接影响 LLM 何时选择此工具"
+    risk_level: ToolRiskLevel = ToolRiskLevel.LOW
+    response_format: str = "content_and_artifact"
+    args_schema: type = MyToolArgs
+    workspace: Path = Field(default_factory=lambda: Path.cwd())
 
-    def __init__(self, *, workspace: str | Path | None = None) -> None:
-        self.workspace = Path(workspace or os.getcwd()).resolve()
+    def __init__(self, *, workspace: str | Path | None = None, **kwargs: Any) -> None:
+        super().__init__(workspace=Path(workspace or os.getcwd()).resolve(), **kwargs)
 
-    async def execute(self, *, file_path: str, verbose: bool = False) -> ToolResult:
+    def _run(self, *, file_path: str, verbose: bool = False) -> tuple[str, dict]:
         # 实现逻辑...
-        return ToolResult(
-            output="LLM 看到的执行结果文本",
-            display="CLI 展示的简短摘要",
-            metadata={"key": "可选的结构化数据"},
+        return (
+            "LLM 看到的执行结果文本",
+            {
+                "display": "CLI 展示的简短摘要",
+                "key": "可选的结构化数据",
+            },
         )
 ```
 
 **关键点**：
 - `description` 直接决定 LLM 的工具选择行为，需精心编写
-- `execute` 参数名必须与 `args_schema` 的字段名一致
+- `_run` 参数名必须与 `args_schema` 的字段名一致
+- 设置 `response_format="content_and_artifact"` 后，`_run` 必须返回 `(content, artifact)`
 - 涉及文件路径的工具必须做 workspace 边界校验（防路径越界）
-- 失败时返回 `ToolResult(output="", error="错误描述")` 而非抛异常
+- 失败时抛出 `ToolException("错误描述")`，不要返回错误字符串伪装成功
 
 ### Step 3: 注册
 
 在 `tools/__init__.py` 的 `create_default_tools` 中添加一行：
 
 ```python
-def create_default_tools(*, workspace: str) -> list[BaseTool]:
-    return [
+def create_default_tools(*, workspace: str, save_memory_fn=None) -> list[BaseTool]:
+    tools: list[BaseTool] = [
         ReadFileTool(workspace=workspace),
         WriteFileTool(workspace=workspace),
         LsTool(workspace=workspace),
         MyTool(workspace=workspace),  # ← 新增
     ]
+    if save_memory_fn is not None:
+        tools.append(SaveMemoryTool(save_fn=save_memory_fn))
+    return tools
 ```
 
 ### Step 4: 配置风险等级（可选）

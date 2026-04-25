@@ -28,19 +28,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# ContextCompressor
-# ---------------------------------------------------------------------------
-
 class ContextCompressor:
-    """上下文压缩器。
-
-    Args:
-        llm: 用于生成摘要的 ChatModel（复用主 LLM）
-        token_limit: 模型 context window 大小
-        threshold: 触发压缩的 token 占比阈值 (0-1)
-        preserve_ratio: 保留最近消息的比例 (0-1)
-    """
+    """上下文压缩器。"""
 
     def __init__(
         self,
@@ -55,29 +44,14 @@ class ContextCompressor:
         self._threshold = threshold
         self._preserve_ratio = preserve_ratio
 
-    # ------------------------------------------------------------------
-    # 公开接口
-    # ------------------------------------------------------------------
-
     def should_compress(self, last_input_tokens: int) -> bool:
         """判断是否需要压缩。"""
         if last_input_tokens <= 0:
             return False
         return last_input_tokens >= self._token_limit * self._threshold
 
-    def compress(
-        self,
-        messages: list[BaseMessage],
-    ) -> CompressResult | None:
-        """执行压缩。
-
-        Args:
-            messages: state.message 中的全部历史消息（不含 system prompt）
-
-        Returns:
-            CompressResult 包含要删除的消息 ID 和摘要消息；
-            如果消息太少不值得压缩则返回 None。
-        """
+    def compress(self, messages: list[BaseMessage]) -> CompressResult | None:
+        """执行压缩。"""
         if len(messages) < 4:
             return None
 
@@ -96,7 +70,6 @@ class ContextCompressor:
             logger.warning("Compression LLM returned empty summary, skipping")
             return None
 
-        # 构造结果
         remove_ids = [msg.id for msg in old_messages if msg.id]
         summary_msg = self.build_summary_message(summary_text)
 
@@ -120,21 +93,11 @@ class ContextCompressor:
             ),
         )
 
-    # ------------------------------------------------------------------
-    # 内部实现
-    # ------------------------------------------------------------------
-
     def _find_split_point(self, messages: list[BaseMessage]) -> int:
-        """找到安全分割点：保留最近 preserve_ratio 的消息，且不切断 tool call 对。
-
-        返回分割索引（该索引之前的消息将被压缩）。
-        """
         total = len(messages)
         keep_count = max(int(total * self._preserve_ratio), 2)
         candidate = total - keep_count
 
-        # 向前搜索安全点：不要在 ToolMessage / AIMessage(has tool_calls) 中间切断
-        # 安全点 = 一个 HumanMessage 的位置，或一个没有 tool_calls 的 AIMessage 之后
         for i in range(candidate, 0, -1):
             msg = messages[i]
             if isinstance(msg, HumanMessage):
@@ -142,20 +105,33 @@ class ContextCompressor:
             if isinstance(msg, AIMessage) and not msg.tool_calls:
                 return i + 1 if i + 1 <= candidate else i
 
-        # fallback: 至少压缩前 2 条
         return min(2, candidate) if candidate > 0 else 0
 
     def _generate_summary(self, old_messages: list[BaseMessage]) -> str:
-        """调用 LLM 生成结构化摘要。"""
-        # 将旧消息序列化为可读文本
         conversation_text = self._serialize_messages(old_messages)
+
+        # 限制输入大小，避免压缩本身超限
+        from core.utils.tokens import estimate_tokens
+        input_tokens = estimate_tokens(conversation_text)
+
+        # 如果输入太大（超过 20k tokens），使用简单摘要而不是调用 LLM
+        if input_tokens > 20000:
+            logger.warning(
+                "Conversation text too large (%d tokens), using simple summary instead of LLM compression",
+                input_tokens
+            )
+            return (
+                f"Previous conversation history ({len(old_messages)} messages) "
+                "has been compressed due to context length limits. "
+                "Key information may have been preserved in recent messages."
+            )
 
         compress_messages = [
             SystemMessage(content=COMPRESSION_SYSTEM_PROMPT),
             HumanMessage(
                 content=(
                     "Please compress the following conversation history "
-                    "into a structured snapshot:\n\n"
+                    "into a structured snapshot (max 500 words):\n\n"
                     f"{conversation_text}"
                 ),
             ),
@@ -163,35 +139,39 @@ class ContextCompressor:
 
         try:
             response = self._llm.invoke(compress_messages)
-            return response.content.strip() if response.content else ""
+            summary = response.content.strip() if response.content else ""
+
+            # 检查摘要大小，如果太大则截断
+            summary_tokens = estimate_tokens(summary)
+            if summary_tokens > 5000:
+                logger.warning("Summary too large (%d tokens), truncating", summary_tokens)
+                # 截断到约 5000 tokens (约 20000 字符)
+                summary = summary[:20000] + "\n\n[Summary truncated due to length]"
+
+            return summary
         except Exception as e:
             logger.error("Compression LLM call failed: %s", e)
             return ""
 
     @staticmethod
     def _serialize_messages(messages: list[BaseMessage]) -> str:
-        """将消息列表序列化为可读文本，用于输入给压缩 LLM。"""
         parts: list[str] = []
         for msg in messages:
-            role = msg.type  # "human", "ai", "tool", "system"
+            role = msg.type
             content = msg.content or ""
 
             if isinstance(msg, AIMessage) and msg.tool_calls:
                 tool_names = [tc["name"] for tc in msg.tool_calls]
                 parts.append(f"[{role}] (called tools: {', '.join(tool_names)})")
                 if content:
-                    parts.append(f"  {_truncate(content, 500)}")
+                    parts.append(f"  {_truncate(content, 200)}")  # 减少到 200
             elif isinstance(msg, ToolMessage):
-                parts.append(f"[tool:{msg.name}] {_truncate(content, 300)}")
+                parts.append(f"[tool:{msg.name}] {_truncate(content, 150)}")  # 减少到 150
             else:
-                parts.append(f"[{role}] {_truncate(content, 800)}")
+                parts.append(f"[{role}] {_truncate(content, 300)}")  # 减少到 300
 
         return "\n".join(parts)
 
-
-# ---------------------------------------------------------------------------
-# 结果数据类
-# ---------------------------------------------------------------------------
 
 class CompressResult:
     """压缩结果。"""
@@ -221,10 +201,6 @@ class CompressResult:
         self.removed_count = removed_count
         self.kept_count = kept_count
 
-
-# ---------------------------------------------------------------------------
-# 辅助函数
-# ---------------------------------------------------------------------------
 
 def _truncate(text: str | list, max_len: int = 500) -> str:
     """截断文本。"""

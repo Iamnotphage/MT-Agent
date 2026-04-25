@@ -1,18 +1,13 @@
-"""save_memory — 让 Agent 能够持久化记忆
-
-Agent 通过 function calling 调用此工具，将重要事实写入
-~/.mtagent/CONTEXT.md 的 ## Agent Memories 区域。
-
-遵循三层架构: Tool 不直接 import Core，通过 callback 访问 ContextManager。
-"""
+"""save_memory — 让 Agent 能够持久化记忆"""
 
 from __future__ import annotations
 
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field
+from langchain_core.tools.base import ToolException
+from pydantic import BaseModel, ConfigDict, Field
 
-from tools.base import BaseTool, ToolResult, ToolRiskLevel
+from tools.base import BaseTool, ToolRiskLevel
 
 
 class SaveMemoryArgs(BaseModel):
@@ -24,33 +19,29 @@ class SaveMemoryArgs(BaseModel):
 class SaveMemoryTool(BaseTool):
     """持久化 Agent 记忆"""
 
-    name = "save_memory"
-    description = (
+    name: str = "save_memory"
+    description: str = (
         "Save an important fact to persistent memory so it can be reused across sessions. "
         "Use this when the user explicitly asks you to remember something, or when you "
         "discover stable project knowledge that will likely be useful later."
     )
-    risk_level = ToolRiskLevel.LOW
-    args_schema = SaveMemoryArgs
+    risk_level: ToolRiskLevel = ToolRiskLevel.LOW
+    response_format: str = "content_and_artifact"
+    args_schema: type = SaveMemoryArgs
+    save_fn: Callable = Field(exclude=True)
 
-    def __init__(self, save_fn: Callable[[str], None]) -> None:
-        """
-        Args:
-            save_fn: 写入记忆的回调函数，签名为 (fact: str) -> None。
-                     由 AgentRuntime 传入 context_manager.save_memory。
-        """
-        self._save_fn = save_fn
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    async def execute(self, **kwargs: Any) -> ToolResult:
+    def __init__(self, save_fn: Callable[[str], str | None], **kwargs: Any) -> None:
+        super().__init__(save_fn=save_fn, **kwargs)
+
+    def _run(self, **kwargs: Any) -> tuple[str, dict]:
         fact: str = kwargs["fact"]
         if not fact.strip():
-            return ToolResult(output="", error="记忆内容不能为空")
+            raise ToolException("记忆内容不能为空")
 
         try:
-            self._save_fn(fact)
-            return ToolResult(
-                output=f"已保存记忆: {fact}",
-                display=f"💾 已记住: {fact}",
-            )
+            self.save_fn(fact)
+            return f"已保存记忆: {fact}", {"display": f"💾 已记住: {fact}"}
         except Exception as e:
-            return ToolResult(output="", error=f"保存记忆失败: {e}")
+            raise ToolException(f"保存记忆失败: {e}")

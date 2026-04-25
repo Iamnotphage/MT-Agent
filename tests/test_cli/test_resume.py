@@ -51,7 +51,7 @@ def test_cmd_resume_restores_existing_checkpoint(monkeypatch, tmp_path):
     recorder, filepath = _make_recorder(tmp_path)
     console = Console(record=True, width=100)
     graph = _FakeGraph(SimpleNamespace(
-        values={"message": recorder.build_resume_messages(filepath)},
+        values={"messages": recorder.build_resume_messages(filepath)},
         next=(),
     ))
 
@@ -84,7 +84,7 @@ def test_cmd_resume_marks_interrupted_tool_execution(monkeypatch, tmp_path):
     console = Console(record=True, width=100)
     graph = _FakeGraph(SimpleNamespace(
         values={
-            "message": recorder.build_resume_messages(filepath),
+            "messages": recorder.build_resume_messages(filepath),
             "pending_tool_calls": [{
                 "call_id": "call_1",
                 "tool_name": "read_file",
@@ -94,7 +94,7 @@ def test_cmd_resume_marks_interrupted_tool_execution(monkeypatch, tmp_path):
                 "error_msg": None,
             }],
         },
-        next=("tool_execution",),
+        next=("tools",),
     ))
 
     monkeypatch.setattr(resume_mod, "_session_picker", lambda sessions: sessions[0])
@@ -104,10 +104,10 @@ def test_cmd_resume_marks_interrupted_tool_execution(monkeypatch, tmp_path):
 
     assert thread_id == "thread-restore"
     assert graph.update_called is True
-    assert graph.update_args["as_node"] == "observation"
+    assert graph.update_args["as_node"] == "tools"
     assert graph.update_args["values"]["pending_tool_calls"] == []
     assert graph.update_args["values"]["should_continue"] is False
-    assert len(graph.update_args["values"]["message"]) == 1
+    assert len(graph.update_args["values"]["messages"]) == 1
 
 
 def test_cmd_resume_rejects_inconsistent_awaiting_approval(monkeypatch, tmp_path):
@@ -115,7 +115,7 @@ def test_cmd_resume_rejects_inconsistent_awaiting_approval(monkeypatch, tmp_path
     console = Console(record=True, width=100)
     graph = _FakeGraph(SimpleNamespace(
         values={
-            "message": recorder.build_resume_messages(filepath),
+            "messages": recorder.build_resume_messages(filepath),
             "pending_tool_calls": [{
                 "call_id": "call_1",
                 "tool_name": "write_file",
@@ -142,7 +142,7 @@ def test_cmd_resume_allows_reapproval_when_interrupt_present(monkeypatch, tmp_pa
     console = Console(record=True, width=100)
     graph = _FakeGraph(SimpleNamespace(
         values={
-            "message": recorder.build_resume_messages(filepath),
+            "messages": recorder.build_resume_messages(filepath),
             "pending_tool_calls": [{
                 "call_id": "call_1",
                 "tool_name": "write_file",
@@ -176,7 +176,7 @@ def test_cmd_resume_warns_when_checkpoint_and_transcript_diverge(monkeypatch, tm
     console = Console(record=True, width=100)
     graph = _FakeGraph(SimpleNamespace(
         values={
-            "message": recorder.build_resume_messages(filepath) + recorder.build_resume_messages(filepath),
+            "messages": recorder.build_resume_messages(filepath) + recorder.build_resume_messages(filepath),
         },
         next=(),
         tasks=(),

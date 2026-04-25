@@ -1,14 +1,4 @@
-"""
-会话管理 — 统计、录制、持久化、列表、加载
-
-职责:
-  - SessionStats: 会话期间实时统计（token、轮次、工具调用）
-  - SessionRecorder: 消息录制、JSONL 持久化、历史会话列表与加载
-
-设计原则:
-  - 位于 Core 层，不依赖 CLI 或 Tools
-  - 与 ContextManager 解耦，各自独立初始化
-"""
+"""Session recorder and resume helpers."""
 
 from __future__ import annotations
 
@@ -17,23 +7,29 @@ import json
 import logging
 import subprocess
 import time
-import uuid
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
-from core.compressor import ContextCompressor
+from core.context.compressor import ContextCompressor
+from core.session.stats import SessionStats
 from core.utils.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
+_RENDERABLE_TYPES = {
+    "thought",
+    "tool_request",
+    "tool_complete",
+    "tool_diff",
+    "tool_call",
+    "approval_request",
+    "approval_decision",
+    "transcript_message",
+}
 
-# ---------------------------------------------------------------------------
-# 辅助函数
-# ---------------------------------------------------------------------------
 
 def format_relative_time(timestamp_ms: int) -> str:
     """将毫秒时间戳转为相对时间描述（如 '2 hours ago'）。"""
@@ -63,107 +59,8 @@ def format_file_size(size_bytes: int) -> str:
     return f"{size_bytes / (1024 * 1024):.1f}MB"
 
 
-# ---------------------------------------------------------------------------
-# SessionStats
-# ---------------------------------------------------------------------------
-
-@dataclass
-class SessionStats:
-    """会话期间的实时统计，退出时渲染到 CLI。"""
-
-    session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    start_time: float = field(default_factory=time.time)
-    model: str = ""
-
-    # Token 统计
-    total_input_tokens: int = 0
-    total_output_tokens: int = 0
-    total_tokens: int = 0
-    last_input_tokens: int = 0  # 最近一次 LLM 调用的 input tokens（即上下文占用）
-
-    # 轮次统计
-    turn_count: int = 0
-    prompt_count: int = 0
-
-    # 工具统计
-    tool_calls_total: int = 0
-    tool_calls_success: int = 0
-    tool_calls_failed: int = 0
-    tool_calls_by_name: dict[str, int] = field(default_factory=dict)
-
-    @property
-    def duration_seconds(self) -> float:
-        return time.time() - self.start_time
-
-    def record_llm_usage(self, input_tokens: int, output_tokens: int, model: str = "") -> None:
-        """记录一次 LLM 调用的 token 用量。"""
-        self.total_input_tokens += input_tokens
-        self.total_output_tokens += output_tokens
-        self.total_tokens += input_tokens + output_tokens
-        self.last_input_tokens = input_tokens
-        self.turn_count += 1
-        if model:
-            self.model = model
-
-    def record_tool_call(self, tool_name: str, success: bool) -> None:
-        """记录一次工具调用。"""
-        self.tool_calls_total += 1
-        if success:
-            self.tool_calls_success += 1
-        else:
-            self.tool_calls_failed += 1
-        self.tool_calls_by_name[tool_name] = self.tool_calls_by_name.get(tool_name, 0) + 1
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为 dict（用于 session_end 记录）。"""
-        return {
-            "session_id": self.session_id,
-            "model": self.model,
-            "duration_ms": int(self.duration_seconds * 1000),
-            "turns": self.turn_count,
-            "prompts": self.prompt_count,
-            "tokens": {
-                "input": self.total_input_tokens,
-                "output": self.total_output_tokens,
-                "total": self.total_tokens,
-            },
-            "tools": {
-                "total": self.tool_calls_total,
-                "success": self.tool_calls_success,
-                "failed": self.tool_calls_failed,
-                "by_name": dict(self.tool_calls_by_name),
-            },
-        }
-
-
-# ---------------------------------------------------------------------------
-# SessionRecorder
-# ---------------------------------------------------------------------------
-
-# 可渲染的记录类型（load_session 时过滤用）
-_RENDERABLE_TYPES = {
-    "thought",
-    "tool_request",
-    "tool_complete",
-    "tool_diff",
-    "tool_call",
-    "approval_request",
-    "approval_decision",
-    "transcript_message",
-}
-
-
 class SessionRecorder:
-    """
-    会话录制与历史管理。
-
-    Usage::
-
-        recorder = SessionRecorder(working_directory="/path/to/project", config=CONTEXT_CONFIG)
-        recorder.record({"type": "user", "display": "hello"})
-        recorder.flush()  # 退出时写入 JSONL
-        sessions = recorder.list_sessions()
-    """
+    """会话录制与历史管理。"""
 
     def __init__(self, working_directory: str, config: dict[str, Any]) -> None:
         self._working_dir = Path(working_directory).resolve()
@@ -173,10 +70,6 @@ class SessionRecorder:
         self._records: list[dict] = []
         self._resumed_from: Path | None = None
         self._thread_id: str = ""
-
-    # ------------------------------------------------------------------
-    # 录制
-    # ------------------------------------------------------------------
 
     def record(self, record: dict) -> None:
         """记录一条会话消息（追加到内存缓冲区）。"""
@@ -188,21 +81,11 @@ class SessionRecorder:
         """更新当前活跃的 LangGraph thread_id。"""
         self._thread_id = thread_id
 
-    # ------------------------------------------------------------------
-    # 持久化
-    # ------------------------------------------------------------------
-
     def flush(self) -> Path | None:
-        """
-        将会话记录写入磁盘 JSONL 文件。
-
-        如果是 resume 的会话，合并旧消息并删除旧文件。
-        返回写入的文件路径，如果无记录则返回 None。
-        """
+        """将会话记录写入磁盘 JSONL 文件。"""
         if not self._records:
             return None
 
-        # resume: 合并旧消息
         all_records: list[dict] = []
         if self._resumed_from and self._resumed_from.is_file():
             all_records.extend(self.load_raw_session(self._resumed_from))
@@ -239,7 +122,6 @@ class SessionRecorder:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             f.write(json.dumps(end_record, ensure_ascii=False) + "\n")
 
-        # 删除旧文件
         if self._resumed_from and self._resumed_from.is_file() and self._resumed_from != filepath:
             try:
                 self._resumed_from.unlink()
@@ -249,10 +131,6 @@ class SessionRecorder:
 
         logger.info("Session saved to %s (%d records)", filepath, len(self._records))
         return filepath
-
-    # ------------------------------------------------------------------
-    # 历史查询
-    # ------------------------------------------------------------------
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """列出当前项目的所有历史会话（按时间倒序）。"""
@@ -327,7 +205,6 @@ class SessionRecorder:
 
     @staticmethod
     def _build_messages_from_transcript(records: list[dict]) -> list[BaseMessage]:
-        """从 canonical transcript 记录重建 LangChain 消息。"""
         messages: list[BaseMessage] = []
         for record in records:
             role = record.get("role")
@@ -350,13 +227,8 @@ class SessionRecorder:
                 messages.append(ToolMessage(**kwargs))
         return messages
 
-    # ------------------------------------------------------------------
-    # 内部实现
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _parse_session_file(filepath: Path) -> dict[str, Any] | None:
-        """解析 JSONL 会话文件，提取摘要信息。"""
         session_id = ""
         thread_id = ""
         model = ""
