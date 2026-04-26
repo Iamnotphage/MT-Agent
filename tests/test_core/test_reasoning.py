@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
+from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.event_bus import EventType
 from core.context.compressor import ContextCompressor
 from core.session import SessionStats
@@ -152,6 +153,12 @@ class TestReasoningNode:
 
     def test_compression_applies_on_current_turn(self, event_bus):
         """触发压缩时，当轮发送给 LLM 的消息应使用摘要后的历史。"""
+        old_limit = CONTEXT_CONFIG["token_limit"]
+        old_reserved = CONTEXT_CONFIG["summary_reserved_tokens"]
+        old_buffer = CONTEXT_CONFIG["autocompact_buffer_tokens"]
+        CONTEXT_CONFIG["token_limit"] = 50
+        CONTEXT_CONFIG["summary_reserved_tokens"] = 20
+        CONTEXT_CONFIG["autocompact_buffer_tokens"] = 20
         llm = MagicMock()
         llm.bind_tools.return_value = llm
         llm.stream.return_value = iter([AIMessageChunk(content="ok")])
@@ -166,31 +173,36 @@ class TestReasoningNode:
         )
         stats = SessionStats(last_input_tokens=80)
 
-        node = create_reasoning_node(
-            llm,
-            event_bus,
-            session_stats=stats,
-            compressor=compressor,
-        )
-        state = {
-            "messages": [
-                HumanMessage(content="u1", id="m1"),
-                HumanMessage(content="u2", id="m2"),
-                HumanMessage(content="u3", id="m3"),
-                HumanMessage(content="u4", id="m4"),
-            ],
-            "turn_count": 1,
-        }
+        try:
+            node = create_reasoning_node(
+                llm,
+                event_bus,
+                session_stats=stats,
+                compressor=compressor,
+            )
+            state = {
+                "messages": [
+                    HumanMessage(content="u1", id="m1"),
+                    HumanMessage(content="u2", id="m2"),
+                    HumanMessage(content="u3", id="m3"),
+                    HumanMessage(content="u4", id="m4"),
+                ],
+                "turn_count": 1,
+            }
 
-        result = node(state)
+            result = node(state)
 
-        streamed_messages = llm.stream.call_args.args[0]
-        assert "conversation_history_summary" in streamed_messages[1].content
-        assert streamed_messages[2].content == "u3"
-        assert streamed_messages[3].content == "u4"
-        assert result["messages"][0].id == "m1"
-        assert result["messages"][1].id == "m2"
-        assert "conversation_history_summary" in result["messages"][2].content
+            streamed_messages = llm.stream.call_args.args[0]
+            assert "conversation_history_summary" in streamed_messages[1].content
+            assert streamed_messages[2].content == "u3"
+            assert streamed_messages[3].content == "u4"
+            assert result["messages"][0].id == "m1"
+            assert result["messages"][1].id == "m2"
+            assert "conversation_history_summary" in result["messages"][2].content
+        finally:
+            CONTEXT_CONFIG["token_limit"] = old_limit
+            CONTEXT_CONFIG["summary_reserved_tokens"] = old_reserved
+            CONTEXT_CONFIG["autocompact_buffer_tokens"] = old_buffer
 
     def test_context_budget_stats_updated(self, event_bus, mock_llm_text):
         """reasoning 会更新当前上下文预算统计。"""
@@ -208,6 +220,91 @@ class TestReasoningNode:
         assert stats.last_effective_context_limit > 0
         assert stats.last_auto_compact_threshold > 0
         assert stats.last_tokens_until_compact >= 0
+
+    def test_auto_compact_checked_event_emitted(self, event_bus, mock_llm_text):
+        received = []
+        event_bus.subscribe(EventType.AUTO_COMPACT_CHECKED, lambda e: received.append(e))
+        stats = SessionStats()
+
+        node = create_reasoning_node(
+            mock_llm_text,
+            event_bus,
+            session_stats=stats,
+            compressor=ContextCompressor(MagicMock()),
+        )
+        state = {"messages": [HumanMessage(content="hello")], "turn_count": 0}
+        node(state)
+
+        assert len(received) == 1
+        assert "auto_compact_threshold" in received[0].data
+        assert "should_compact" in received[0].data
+
+    def test_auto_compact_failure_increments_counter(self, event_bus, mock_llm_text):
+        old_limit = CONTEXT_CONFIG["token_limit"]
+        old_reserved = CONTEXT_CONFIG["summary_reserved_tokens"]
+        old_buffer = CONTEXT_CONFIG["autocompact_buffer_tokens"]
+        CONTEXT_CONFIG["token_limit"] = 50
+        CONTEXT_CONFIG["summary_reserved_tokens"] = 20
+        CONTEXT_CONFIG["autocompact_buffer_tokens"] = 20
+        stats = SessionStats()
+        received = []
+        event_bus.subscribe(EventType.AUTO_COMPACT_FAILED, lambda e: received.append(e))
+        compressor = MagicMock()
+        compressor.compress.side_effect = RuntimeError("compact blew up")
+
+        try:
+            node = create_reasoning_node(
+                mock_llm_text,
+                event_bus,
+                session_stats=stats,
+                compressor=compressor,
+            )
+            state = {
+                "messages": [HumanMessage(content="u1"), HumanMessage(content="u2"), HumanMessage(content="u3"), HumanMessage(content="u4")],
+                "turn_count": 1,
+            }
+            node(state)
+        finally:
+            CONTEXT_CONFIG["token_limit"] = old_limit
+            CONTEXT_CONFIG["summary_reserved_tokens"] = old_reserved
+            CONTEXT_CONFIG["autocompact_buffer_tokens"] = old_buffer
+
+        assert stats.compression_failure_count == 1
+        assert len(received) == 1
+        assert "compact blew up" in received[0].data["error"]
+
+    def test_auto_compact_circuit_breaker_skips_compress(self, event_bus, mock_llm_text):
+        old_limit = CONTEXT_CONFIG["token_limit"]
+        old_reserved = CONTEXT_CONFIG["summary_reserved_tokens"]
+        old_buffer = CONTEXT_CONFIG["autocompact_buffer_tokens"]
+        CONTEXT_CONFIG["token_limit"] = 50
+        CONTEXT_CONFIG["summary_reserved_tokens"] = 20
+        CONTEXT_CONFIG["autocompact_buffer_tokens"] = 20
+        stats = SessionStats(compression_failure_count=3)
+        received = []
+        event_bus.subscribe(EventType.AUTO_COMPACT_DISABLED, lambda e: received.append(e))
+        compressor = MagicMock()
+
+        try:
+            node = create_reasoning_node(
+                mock_llm_text,
+                event_bus,
+                session_stats=stats,
+                compressor=compressor,
+            )
+            state = {
+                "messages": [HumanMessage(content="u1"), HumanMessage(content="u2"), HumanMessage(content="u3"), HumanMessage(content="u4")],
+                "turn_count": 1,
+            }
+            node(state)
+        finally:
+            CONTEXT_CONFIG["token_limit"] = old_limit
+            CONTEXT_CONFIG["summary_reserved_tokens"] = old_reserved
+            CONTEXT_CONFIG["autocompact_buffer_tokens"] = old_buffer
+
+        compressor.compress.assert_not_called()
+        assert len(received) == 1
+        assert received[0].data["consecutive_failures"] == 3
 
     def test_reasoning_content_is_preserved_for_tool_loop(self, event_bus):
         llm = MagicMock()

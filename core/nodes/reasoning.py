@@ -17,6 +17,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 
 from config.settings import CONTEXT as CONTEXT_CONFIG
+from core.context.auto_compact import AutoCompactDecision, AutoCompactPolicy, QuerySource
 from core.context.budget import budget_snapshot
 from core.event_bus import AgentEvent, EventBus, EventType
 from core.state import AgentState, ToolCallInfo
@@ -43,6 +44,7 @@ def create_reasoning_node(
     context_manager: ContextManager | None = None,
     session_stats: SessionStats | None = None,
     compressor: ContextCompressor | None = None,
+    auto_compact_policy: AutoCompactPolicy | None = None,
 ) -> Callable[[AgentState], dict]:
     """
     创建 reasoning 节点函数
@@ -59,9 +61,11 @@ def create_reasoning_node(
         LangGraph 节点函数 ``(AgentState) -> dict``
     """
     bound_llm = llm.bind_tools(tools) if tools else llm
+    auto_compact_policy = auto_compact_policy or AutoCompactPolicy()
 
     def reasoning_node(state: AgentState) -> dict:
         turn = state.get("turn_count", 0)
+        query_source = state.get("query_source", "interactive")
 
         # 1) system prompt — 每轮动态生成, 含全局上下文 (Tier 1)
         global_context = ""
@@ -91,9 +95,27 @@ def create_reasoning_node(
 
         # 4) 压缩检查 — 基于刚估算的 token 数决定是否压缩
         compress_result = None
+        decision: AutoCompactDecision | None = None
         if compressor is not None and session_stats is not None:
-            compress_result = _maybe_compress(
-                compressor, event_bus, session_stats, state,
+            decision = _build_auto_compact_decision(
+                auto_compact_policy=auto_compact_policy,
+                session_stats=session_stats,
+                query_source=query_source,
+            )
+            _emit_auto_compact_checked(
+                event_bus,
+                decision,
+                turn,
+                auto_compact_policy.max_consecutive_failures,
+            )
+            compress_result = _maybe_auto_compact(
+                compressor=compressor,
+                event_bus=event_bus,
+                session_stats=session_stats,
+                state=state,
+                decision=decision,
+                turn=turn,
+                query_source=query_source,
             )
             # 如果压缩了，重新构建 messages
             if compress_result is not None:
@@ -114,6 +136,7 @@ def create_reasoning_node(
             compressor=compressor,
             session_stats=session_stats,
             state=state,
+            auto_compact_policy=auto_compact_policy,
         )
 
         # 6) 收集 token usage → SessionStats
@@ -207,6 +230,7 @@ def _stream_with_events(
     compressor: ContextCompressor | None = None,
     session_stats: SessionStats | None = None,
     state: AgentState | None = None,
+    auto_compact_policy: AutoCompactPolicy | None = None,
 ) -> AIMessageChunk:
     """流式调用 LLM, 每个 chunk 通过 EventBus 推送事件。
 
@@ -284,6 +308,9 @@ def _stream_with_events(
                                 "summary": aggressive_result.summary_text,
                                 "removed_count": aggressive_result.removed_count,
                                 "kept_count": aggressive_result.kept_count,
+                                "trigger_reason": "reactive_retry",
+                                "pre_tokens": actual_tokens or 0,
+                                "post_tokens": estimate_tokens(str(aggressive_result.summary_message.content)),
                             },
                         ))
 
@@ -296,6 +323,8 @@ def _stream_with_events(
 
                         # 重试 LLM 调用（不传递 compressor 避免无限递归）
                         logger.info("Retrying LLM call with compressed context")
+                        if session_stats is not None:
+                            session_stats.compression_failure_count = 0
                         return _stream_with_events(llm, new_messages, event_bus, turn)
 
         logger.error("LLM streaming error: %s", e)
@@ -490,14 +519,66 @@ def _apply_budget_snapshot(
     session_stats.last_tokens_until_compact = snapshot["tokens_until_compact"]
 
 
-def _maybe_compress(
+def _build_auto_compact_decision(
+    *,
+    auto_compact_policy: AutoCompactPolicy,
+    session_stats: SessionStats,
+    query_source: QuerySource | str,
+) -> AutoCompactDecision:
+    return auto_compact_policy.evaluate(
+        raw_input_tokens=session_stats.last_input_tokens,
+        token_limit=CONTEXT_CONFIG["token_limit"],
+        reserved_summary_tokens=CONTEXT_CONFIG["summary_reserved_tokens"],
+        buffer_tokens=CONTEXT_CONFIG["autocompact_buffer_tokens"],
+        query_source=query_source if isinstance(query_source, str) else "interactive",
+        consecutive_failures=session_stats.compression_failure_count,
+    )
+
+
+def _emit_auto_compact_checked(
+    event_bus: EventBus,
+    decision: AutoCompactDecision,
+    turn: int,
+    max_failures: int,
+) -> None:
+    event_bus.emit(AgentEvent(
+        type=EventType.AUTO_COMPACT_CHECKED,
+        data={
+            "raw_input_tokens": decision.raw_input_tokens,
+            "effective_context_limit": decision.effective_context_limit,
+            "auto_compact_threshold": decision.auto_compact_threshold,
+            "tokens_until_compact": decision.tokens_until_compact,
+            "should_compact": decision.should_compact,
+            "skip_reason": decision.skip_reason,
+            "blocked_by_circuit_breaker": decision.blocked_by_circuit_breaker,
+            "query_source": decision.query_source,
+        },
+        turn=turn,
+    ))
+
+    if decision.blocked_by_circuit_breaker:
+        event_bus.emit(AgentEvent(
+            type=EventType.AUTO_COMPACT_DISABLED,
+            data={
+                "consecutive_failures": decision.consecutive_failures,
+                "max_failures": max_failures,
+                "query_source": decision.query_source,
+            },
+            turn=turn,
+        ))
+
+
+def _maybe_auto_compact(
     compressor: ContextCompressor,
     event_bus: EventBus,
     session_stats: SessionStats,
     state: AgentState,
+    decision: AutoCompactDecision,
+    turn: int,
+    query_source: QuerySource | str,
 ) -> CompressResult | None:
     """检查是否需要压缩，若需要则执行并返回 state 更新。"""
-    if not compressor.should_compress(session_stats.last_input_tokens):
+    if not decision.should_compact:
         return None
 
     history = list(state.get("messages", []))
@@ -508,19 +589,52 @@ def _maybe_compress(
         "Context compression triggered: last_input_tokens=%d",
         session_stats.last_input_tokens,
     )
+    pre_tokens = session_stats.last_input_tokens
 
-    result = compressor.compress(history)
-    if result is None:
+    try:
+        result = compressor.compress(history)
+    except Exception as exc:
+        session_stats.compression_failure_count += 1
+        event_bus.emit(AgentEvent(
+            type=EventType.AUTO_COMPACT_FAILED,
+            data={
+                "error": str(exc),
+                "consecutive_failures": session_stats.compression_failure_count,
+                "query_source": query_source,
+                "trigger_reason": decision.trigger_reason,
+            },
+            turn=turn,
+        ))
+        logger.warning("Auto compact failed: %s", exc)
         return None
 
-    # 发送事件通知 CLI
+    if result is None:
+        session_stats.compression_failure_count += 1
+        event_bus.emit(AgentEvent(
+            type=EventType.AUTO_COMPACT_FAILED,
+            data={
+                "error": "compressor returned no result",
+                "consecutive_failures": session_stats.compression_failure_count,
+                "query_source": query_source,
+                "trigger_reason": decision.trigger_reason,
+            },
+            turn=turn,
+        ))
+        return None
+
+    session_stats.compression_failure_count = 0
+    post_tokens = estimate_tokens(str(result.summary_message.content))
     event_bus.emit(AgentEvent(
         type=EventType.CONTEXT_COMPRESSED,
         data={
             "summary": result.summary_text,
             "removed_count": result.removed_count,
             "kept_count": result.kept_count,
+            "trigger_reason": decision.trigger_reason,
+            "pre_tokens": pre_tokens,
+            "post_tokens": post_tokens,
         },
+        turn=turn,
     ))
 
     logger.info(

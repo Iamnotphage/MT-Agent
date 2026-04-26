@@ -1,11 +1,10 @@
 """
-上下文压缩器 — 当会话历史 token 超过阈值时生成结构化摘要
+上下文压缩器 — 在 auto compact policy 触发后生成结构化摘要。
 
-压缩策略 (参考 gemini-cli chatCompressionService):
-  1. 检测当前 input tokens 是否超过 token_limit 的 compression_threshold
-  2. 找到安全分割点（保留最近 compression_preserve_ratio 的消息）
-  3. 将旧消息发给 LLM，用专用 Compression Prompt 生成结构化 Snapshot
-  4. 用 RemoveMessage 删除旧消息 + 插入摘要消息
+触发判断已经由外部 policy 层负责，这里只保留：
+  1. 找到分割点
+  2. 将旧消息总结为摘要
+  3. 返回可写回 state 的压缩结果
 """
 
 from __future__ import annotations
@@ -45,7 +44,7 @@ class ContextCompressor:
         self._preserve_ratio = preserve_ratio
 
     def should_compress(self, last_input_tokens: int) -> bool:
-        """判断是否需要压缩。"""
+        """兼容旧调用方的比例阈值判断。"""
         if last_input_tokens <= 0:
             return False
         return last_input_tokens >= self._token_limit * self._threshold
