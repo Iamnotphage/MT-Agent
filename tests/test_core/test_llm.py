@@ -4,7 +4,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from core.llm import create_chat_model
-from core.llm_openai_compat import OpenAICompatChatModel
+from core.llm_openai_compat import OpenAICompatChatModel, _usage_to_langchain_usage
 
 MOCK_CLS = "core.llm_openai_compat.OpenAI"
 
@@ -145,4 +145,31 @@ class TestPayloadSerialization:
         assert payload["extra_body"] == {
             "foo": "bar",
             "thinking": {"type": "enabled"},
+        }
+
+    def test_stream_payload_requests_usage(self):
+        model = OpenAICompatChatModel(
+            api_key="sk-test",
+            base_url="https://example.com",
+            model="deepseek-v4-pro",
+        )
+
+        payload = model._build_payload(
+            [HumanMessage(content="hi")],
+            stream=True,
+        )
+
+        assert payload["stream_options"] == {"include_usage": True}
+
+    def test_usage_is_mapped_to_langchain_metadata(self):
+        usage = _usage_to_langchain_usage({
+            "prompt_tokens": 120,
+            "completion_tokens": 45,
+            "total_tokens": 165,
+        })
+
+        assert usage == {
+            "input_tokens": 120,
+            "output_tokens": 45,
+            "total_tokens": 165,
         }

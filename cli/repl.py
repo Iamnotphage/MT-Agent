@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import logging
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -35,6 +37,8 @@ from cli.utils.text import (
 
 if TYPE_CHECKING:
     from core.agent import AgentRuntime
+
+logger = logging.getLogger(__name__)
 
 
 class Repl:
@@ -210,10 +214,19 @@ class Repl:
             return
         self._closed = True
 
+        flush_start = time.time()
         filepath = self.runtime.session.flush()
+        flush_elapsed = time.time() - flush_start
+        if flush_elapsed > 1.0:
+            logger.warning("Session flush took %.3fs", flush_elapsed)
+
         checkpoint_manager = getattr(self.runtime, "checkpoint_manager", None)
         if checkpoint_manager is not None:
+            close_start = time.time()
             checkpoint_manager.__exit__(None, None, None)
+            close_elapsed = time.time() - close_start
+            if close_elapsed > 1.0:
+                logger.warning("Checkpoint manager close took %.3fs", close_elapsed)
             self.runtime.checkpoint_manager = None
         if filepath:
             self.console.print(f"\n  [dim]会话已保存 → {filepath}[/dim]")

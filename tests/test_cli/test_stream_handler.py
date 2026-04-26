@@ -58,3 +58,23 @@ def test_stream_handler_renders_thought_as_single_stream(tmp_path):
     assert "💭 The user wants" in rendered
     assert rendered.count("💭") == 1
     assert session._records == []
+
+
+def test_tool_result_persisted_event_is_not_recorded_separately(tmp_path):
+    session = _make_session(tmp_path)
+    bus = EventBus()
+    StreamHandler(Console(record=True, width=100), bus, session)
+
+    bus.emit(AgentEvent(
+        type=EventType.TOOL_RESULT_PERSISTED,
+        data={
+            "call_id": "call_1",
+            "tool_name": "grep",
+            "path": "tool-results/call_1.txt",
+            "original_chars": 25000,
+            "preview_chars": 2000,
+            "reason": "per-tool-limit",
+        },
+    ))
+
+    assert session._records == []

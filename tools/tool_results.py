@@ -51,6 +51,21 @@ class ToolResultCandidate:
     original_chars: int = 0
 
 
+def build_generic_tool_use_result(
+    *,
+    tool_name: str,
+    input_args: dict[str, Any] | None,
+    raw_content: str,
+) -> dict[str, Any]:
+    return {
+        "type": tool_name,
+        "input": dict(input_args or {}),
+        "result": {
+            "rawText": raw_content,
+        },
+    }
+
+
 def get_tool_result_threshold(tool_name: str) -> int | float:
     if tool_name in SPECIAL_TOOL_NAMES:
         return float("inf")
@@ -124,6 +139,51 @@ def build_tool_use_result_metadata(
         "truncated": truncated,
         "persistence_reason": persistence_reason,
     }
+
+
+def merge_budget_metadata(
+    tool_use_result: dict[str, Any] | None,
+    *,
+    tool_name: str,
+    input_args: dict[str, Any] | None,
+    raw_content: str,
+    artifact_path: str | None,
+    original_chars: int,
+    preview_chars: int,
+    truncated: bool,
+    persistence_reason: str | None,
+) -> dict[str, Any]:
+    merged = dict(
+        tool_use_result
+        or build_generic_tool_use_result(
+            tool_name=tool_name,
+            input_args=input_args,
+            raw_content=raw_content,
+        )
+    )
+    if artifact_path:
+        result = dict(merged.get("result") or {})
+        raw_text = result.get("rawText")
+        if isinstance(raw_text, str):
+            preview, _ = generate_preview(raw_text, preview_chars)
+            result.pop("rawText", None)
+            result["preview"] = preview
+            merged["result"] = result
+    merged["budget"] = build_tool_use_result_metadata(
+        tool_name=tool_name,
+        original_chars=original_chars,
+        preview_chars=preview_chars,
+        truncated=truncated,
+        artifact_path=artifact_path,
+        persistence_reason=persistence_reason,
+    )
+    return merged
+
+
+def extract_tool_use_result(tool_message: ToolMessage) -> dict[str, Any] | None:
+    artifact = dict(tool_message.artifact or {})
+    tool_use_result = artifact.get("toolUseResult")
+    return dict(tool_use_result) if isinstance(tool_use_result, dict) else None
 
 
 def apply_transcript_metadata(

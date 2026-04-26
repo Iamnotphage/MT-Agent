@@ -14,12 +14,13 @@ import logging
 from typing import Any, Callable
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 
 from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.context.budget import budget_snapshot
 from core.event_bus import AgentEvent, EventBus, EventType
 from core.state import AgentState, ToolCallInfo
+from core.utils.tokens import estimate_tokens
 from prompts.system_prompt import build_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -318,17 +319,37 @@ def _stream_with_events(
 
 
 def _prepare_history_for_model(messages: list[BaseMessage]) -> list[BaseMessage]:
-    """Keep reasoning_content only for assistant messages in the current tool loop."""
-    last_human_idx = -1
-    for idx, message in enumerate(messages):
-        if isinstance(message, HumanMessage):
-            last_human_idx = idx
+    """Keep reasoning_content for any completed turn segment that involved tool use."""
+    if not messages:
+        return []
+
+    human_indices = [idx for idx, message in enumerate(messages) if isinstance(message, HumanMessage)]
+    segments: list[tuple[int, int]] = []
+    if not human_indices:
+        segments.append((0, len(messages)))
+    else:
+        for pos, start_idx in enumerate(human_indices):
+            end_idx = human_indices[pos + 1] if pos + 1 < len(human_indices) else len(messages)
+            segments.append((start_idx, end_idx))
+
+    preserve_reasoning_indices: set[int] = set()
+    for start_idx, end_idx in segments:
+        segment = messages[start_idx:end_idx]
+        has_tool_activity = any(
+            isinstance(message, ToolMessage)
+            or (isinstance(message, AIMessage) and bool(message.tool_calls))
+            for message in segment
+        )
+        if has_tool_activity:
+            for idx in range(start_idx, end_idx):
+                if isinstance(messages[idx], AIMessage):
+                    preserve_reasoning_indices.add(idx)
 
     prepared: list[BaseMessage] = []
     for idx, message in enumerate(messages):
         if isinstance(message, AIMessage):
             reasoning_content = (message.additional_kwargs or {}).get("reasoning_content")
-            if reasoning_content and idx <= last_human_idx:
+            if reasoning_content and idx not in preserve_reasoning_indices:
                 additional_kwargs = dict(message.additional_kwargs or {})
                 additional_kwargs.pop("reasoning_content", None)
                 prepared.append(AIMessage(
@@ -404,6 +425,22 @@ def _record_token_usage(
         session_stats.record_llm_usage(
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=usage.get("completion_tokens", 0),
+        )
+        return
+
+    estimated_input_tokens = max(session_stats.last_input_tokens, 0)
+    estimated_output_tokens = estimate_tokens(str(response.content or ""))
+    if getattr(response, "tool_calls", None):
+        estimated_output_tokens += estimate_tokens(str(response.tool_calls))
+    if estimated_input_tokens > 0 or estimated_output_tokens > 0:
+        logger.warning(
+            "LLM usage metadata missing; falling back to estimates input=%d output=%d",
+            estimated_input_tokens,
+            estimated_output_tokens,
+        )
+        session_stats.record_llm_usage(
+            input_tokens=estimated_input_tokens,
+            output_tokens=estimated_output_tokens,
         )
 
 

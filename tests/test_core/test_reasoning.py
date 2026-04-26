@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from core.event_bus import EventType
 from core.context.compressor import ContextCompressor
 from core.session import SessionStats
-from core.nodes.reasoning import create_reasoning_node, should_use_tools
+from core.nodes.reasoning import _record_token_usage, create_reasoning_node, should_use_tools
 
 
 class TestReasoningNode:
@@ -232,13 +232,12 @@ class TestReasoningNode:
         assistant = result["messages"][0]
         assert assistant.additional_kwargs["reasoning_content"] == "need more tool work"
 
-    def test_old_reasoning_content_is_cleared_after_new_user_turn(self, event_bus, mock_llm_text):
+    def test_old_reasoning_content_is_cleared_when_prior_turn_had_no_tools(self, event_bus, mock_llm_text):
         node = create_reasoning_node(mock_llm_text, event_bus)
         history = [
             HumanMessage(content="question 1"),
             AIMessage(
-                content="tool step",
-                tool_calls=[{"name": "glob", "args": {}, "id": "call_1", "type": "tool_call"}],
+                content="plain answer",
                 additional_kwargs={"reasoning_content": "old chain"},
             ),
             HumanMessage(content="question 2"),
@@ -251,6 +250,33 @@ class TestReasoningNode:
         assistant_history = streamed_messages[-2]
         assert isinstance(assistant_history, AIMessage)
         assert "reasoning_content" not in (assistant_history.additional_kwargs or {})
+
+    def test_old_reasoning_content_is_preserved_after_tool_turn(self, event_bus, mock_llm_text):
+        node = create_reasoning_node(mock_llm_text, event_bus)
+        history = [
+            HumanMessage(content="question 1"),
+            AIMessage(
+                content="let me inspect files",
+                tool_calls=[{"name": "glob", "args": {}, "id": "call_1", "type": "tool_call"}],
+                additional_kwargs={"reasoning_content": "tool turn thinking"},
+            ),
+            AIMessage(
+                content="I found the files.",
+                additional_kwargs={"reasoning_content": "final tool-turn reasoning"},
+            ),
+            HumanMessage(content="question 2"),
+        ]
+        state = {"messages": history, "turn_count": 1}
+
+        node(state)
+
+        streamed_messages = mock_llm_text.stream.call_args.args[0]
+        first_assistant = streamed_messages[-3]
+        second_assistant = streamed_messages[-2]
+        assert isinstance(first_assistant, AIMessage)
+        assert isinstance(second_assistant, AIMessage)
+        assert first_assistant.additional_kwargs["reasoning_content"] == "tool turn thinking"
+        assert second_assistant.additional_kwargs["reasoning_content"] == "final tool-turn reasoning"
 
 
 class TestShouldUseTools:
@@ -265,3 +291,16 @@ class TestShouldUseTools:
 
     def test_missing_key(self):
         assert should_use_tools({}) == "final_answer"
+
+
+class TestTokenUsageFallback:
+
+    def test_fallback_to_estimated_tokens_when_usage_missing(self):
+        stats = SessionStats(last_input_tokens=123)
+        response = AIMessageChunk(content="hello world")
+
+        _record_token_usage(response, stats)
+
+        assert stats.turn_count == 1
+        assert stats.total_input_tokens == 123
+        assert stats.total_output_tokens > 0

@@ -47,3 +47,45 @@ def test_wrapper_persists_large_grep_result(tmp_path):
     assert len(transcript_events) == 1
     assert transcript_events[0].data["role"] == "tool"
     assert transcript_events[0].data["artifact"]["path"] == "tool-results/call_1.txt"
+    assert transcript_events[0].data["toolUseResult"]["type"] == "grep"
+    assert transcript_events[0].data["toolUseResult"]["input"] == {}
+    assert transcript_events[0].data["toolUseResult"]["budget"]["artifact"] == "tool-results/call_1.txt"
+    assert "rawText" not in transcript_events[0].data["toolUseResult"]["result"]
+    assert len(transcript_events[0].data["toolUseResult"]["result"]["preview"]) <= 2000
+
+
+def test_wrapper_preserves_tool_defined_tool_use_result(tmp_path):
+    bus = EventBus()
+    session = _FakeSession(tmp_path / "session")
+    seen = []
+    bus.subscribe_all(lambda event: seen.append(event))
+    wrapper = create_event_bus_wrapper(bus, session=session)
+
+    request = _FakeRequest({"id": "call_2", "name": "read_file", "args": {"file_path": "m0.md", "offset": 1, "limit": 2}})
+    result = wrapper(
+        request,
+        lambda _request: ToolMessage(
+            content="1\tline1\n2\tline2\n",
+            tool_call_id="call_2",
+            artifact={
+                "display": "m0.md (2 lines)",
+                "toolUseResult": {
+                    "type": "text",
+                    "input": {"file_path": "m0.md", "offset": 1, "limit": 2},
+                    "file": {
+                        "filePath": "m0.md",
+                        "content": "line1\nline2\n",
+                        "startLine": 1,
+                        "numLines": 2,
+                        "totalLines": 10,
+                        "truncated": False,
+                    },
+                },
+            },
+        ),
+    )
+
+    transcript_event = [event for event in seen if event.type == EventType.TRANSCRIPT_MESSAGE][0]
+    assert result.content == "1\tline1\n2\tline2\n"
+    assert transcript_event.data["toolUseResult"]["file"]["content"] == "line1\nline2\n"
+    assert transcript_event.data["toolUseResult"]["budget"]["artifact"] is None

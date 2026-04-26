@@ -9,13 +9,15 @@ from typing import Callable
 
 from langchain_core.messages import ToolMessage
 
-from core.context.tool_results import (
+from tools.tool_results import (
     MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
     ToolResultCandidate,
     apply_aggregate_budget,
     apply_transcript_metadata,
     candidate_from_tool_message,
+    extract_tool_use_result,
     get_tool_result_threshold,
+    merge_budget_metadata,
     maybe_persist_tool_result,
 )
 from core.event_bus import AgentEvent, EventBus, EventType
@@ -40,6 +42,7 @@ def create_event_bus_wrapper(event_bus: EventBus, session=None) -> Callable:
         tc = request.tool_call
         tool_name = tc["name"]
         call_id = tc["id"]
+        input_args = tc.get("args") or {}
 
         # ── executing ──
         start_time = time.time()
@@ -87,6 +90,7 @@ def create_event_bus_wrapper(event_bus: EventBus, session=None) -> Callable:
             if session is not None:
                 content = str(result.content or "")
                 threshold = get_tool_result_threshold(tool_name)
+                existing_tool_use_result = extract_tool_use_result(result)
                 decision = maybe_persist_tool_result(
                     tool_name=tool_name,
                     tool_call_id=call_id,
@@ -98,10 +102,21 @@ def create_event_bus_wrapper(event_bus: EventBus, session=None) -> Callable:
                     reason="per-tool-limit",
                 )
                 result.content = decision.content
+                merged_tool_use_result = merge_budget_metadata(
+                    existing_tool_use_result,
+                    tool_name=tool_name,
+                    input_args=input_args,
+                    raw_content=content,
+                    artifact_path=decision.artifact_meta["path"] if decision.artifact_meta else None,
+                    original_chars=decision.original_chars,
+                    preview_chars=decision.tool_use_result["preview_chars"],
+                    truncated=decision.tool_use_result["truncated"],
+                    persistence_reason=decision.reason,
+                )
                 apply_transcript_metadata(
                     result,
                     display=display,
-                    tool_use_result=decision.tool_use_result,
+                    tool_use_result=merged_tool_use_result,
                     artifact_meta=decision.artifact_meta,
                 )
                 if decision.persisted:
@@ -132,10 +147,24 @@ def create_event_bus_wrapper(event_bus: EventBus, session=None) -> Callable:
                         for aggregate_decision in aggregate_decisions:
                             aggregate_candidate = batch_candidates[aggregate_decision.tool_call_id]
                             aggregate_candidate.tool_message.content = aggregate_decision.content
+                            existing_tool_use_result = extract_tool_use_result(
+                                aggregate_candidate.tool_message
+                            )
+                            merged_tool_use_result = merge_budget_metadata(
+                                existing_tool_use_result,
+                                tool_name=aggregate_decision.tool_name,
+                                input_args=(existing_tool_use_result or {}).get("input"),
+                                raw_content=aggregate_candidate.content,
+                                artifact_path=aggregate_decision.artifact_meta["path"] if aggregate_decision.artifact_meta else None,
+                                original_chars=aggregate_decision.original_chars,
+                                preview_chars=aggregate_decision.tool_use_result["preview_chars"],
+                                truncated=aggregate_decision.tool_use_result["truncated"],
+                                persistence_reason=aggregate_decision.reason,
+                            )
                             apply_transcript_metadata(
                                 aggregate_candidate.tool_message,
                                 display=aggregate_candidate.display,
-                                tool_use_result=aggregate_decision.tool_use_result,
+                                tool_use_result=merged_tool_use_result,
                                 artifact_meta=aggregate_decision.artifact_meta,
                             )
                             pending_batch_events.append((

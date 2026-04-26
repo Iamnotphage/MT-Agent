@@ -121,24 +121,34 @@ class OpenAICompatChatModel(BaseChatModel):
         response = self._client.chat.completions.create(**payload)
 
         for chunk in response:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            content = delta.content or ""
-            reasoning_content = _maybe_get_attr(delta, "reasoning_content")
-            tool_call_chunks = self._tool_call_chunks_from_delta(delta)
-
-            if not content and not reasoning_content and not tool_call_chunks:
+            usage = self._usage_to_dict(getattr(chunk, "usage", None))
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta is None and usage is None:
                 continue
 
             additional_kwargs = {}
-            if reasoning_content:
-                additional_kwargs["reasoning_content"] = reasoning_content
+            tool_call_chunks = []
+            content = ""
+
+            if delta is not None:
+                content = delta.content or ""
+                reasoning_content = _maybe_get_attr(delta, "reasoning_content")
+                tool_call_chunks = self._tool_call_chunks_from_delta(delta)
+                if reasoning_content:
+                    additional_kwargs["reasoning_content"] = reasoning_content
+
+            if not content and not additional_kwargs and not tool_call_chunks and usage is None:
+                continue
+
+            usage_metadata = _usage_to_langchain_usage(usage) if usage else None
+            response_metadata = {"usage": usage} if usage else {}
 
             message = AIMessageChunk(
                 content=content,
                 additional_kwargs=additional_kwargs,
                 tool_call_chunks=tool_call_chunks,
+                usage_metadata=usage_metadata,
+                response_metadata=response_metadata,
             )
             yield ChatGenerationChunk(message=message)
 
@@ -155,6 +165,8 @@ class OpenAICompatChatModel(BaseChatModel):
             "messages": [self._message_to_dict(message) for message in messages],
             "stream": stream,
         }
+        if stream:
+            payload["stream_options"] = {"include_usage": True}
 
         if self.temperature is not None:
             payload["temperature"] = self.temperature
@@ -305,3 +317,11 @@ def _maybe_get_attr(obj: Any, name: str) -> Any:
     if isinstance(extra, dict):
         return extra.get(name)
     return None
+
+
+def _usage_to_langchain_usage(usage: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "input_tokens": int(usage.get("prompt_tokens", 0) or 0),
+        "output_tokens": int(usage.get("completion_tokens", 0) or 0),
+        "total_tokens": int(usage.get("total_tokens", 0) or 0),
+    }

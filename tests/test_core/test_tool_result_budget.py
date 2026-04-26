@@ -2,7 +2,7 @@ from pathlib import Path
 
 from langchain_core.messages import ToolMessage
 
-from core.context.tool_results import (
+from tools.tool_results import (
     MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
     apply_aggregate_budget,
     apply_transcript_metadata,
@@ -72,3 +72,26 @@ def test_apply_transcript_metadata_updates_tool_message():
     )
     assert message.artifact["toolUseResult"]["kind"] == "text"
     assert message.artifact["artifact_meta"]["path"] == "tool-results/call_1.txt"
+
+
+def test_merge_budget_metadata_drops_large_raw_text_when_persisted():
+    from tools.tool_results import merge_budget_metadata
+
+    merged = merge_budget_metadata(
+        {
+            "type": "grep",
+            "input": {"pattern": "TODO"},
+            "result": {"rawText": "x" * 25_000},
+        },
+        tool_name="grep",
+        input_args={"pattern": "TODO"},
+        raw_content="x" * 25_000,
+        artifact_path="tool-results/call_1.txt",
+        original_chars=25_000,
+        preview_chars=2_000,
+        truncated=True,
+        persistence_reason="per-tool-limit",
+    )
+
+    assert "rawText" not in merged["result"]
+    assert len(merged["result"]["preview"]) <= 2_000

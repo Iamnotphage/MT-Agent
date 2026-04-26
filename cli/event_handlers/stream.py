@@ -270,18 +270,7 @@ class StreamHandler:
             self._flush_tool_buffer()
 
     def on_tool_result_persisted(self, event: AgentEvent) -> None:
-        self._session.record({
-            "type": "tool_result_artifact",
-            "tool_call_id": event.data.get("call_id", ""),
-            "name": event.data.get("tool_name", ""),
-            "artifact": {
-                "path": event.data.get("path", ""),
-                "kind": "text",
-                "original_chars": event.data.get("original_chars", 0),
-                "preview_chars": event.data.get("preview_chars", 0),
-                "reason": event.data.get("reason", ""),
-            },
-        })
+        return
 
     # ── 渲染工具缓冲 ─────────────────────────────────────────────
 
