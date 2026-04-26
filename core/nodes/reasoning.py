@@ -14,7 +14,7 @@ import logging
 from typing import Any, Callable
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, AIMessageChunk, RemoveMessage, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, RemoveMessage, SystemMessage
 
 from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.context.budget import budget_snapshot
@@ -80,7 +80,7 @@ def create_reasoning_node(
                 from langchain_core.messages import HumanMessage
                 messages.append(HumanMessage(content=session_ctx))
 
-        history = list(state.get("messages", []))
+        history = _prepare_history_for_model(list(state.get("messages", [])))
         messages.extend(history)
 
         # 3) 估算当前 messages 的 token 数并更新统计，让压缩检查基于当前轮
@@ -124,9 +124,16 @@ def create_reasoning_node(
             )
 
         # 7) 构造 AIMessage 写入 state.messages 历史
+        reasoning_content = _extract_reasoning_content(collected)
+        additional_kwargs = (
+            {"reasoning_content": reasoning_content}
+            if reasoning_content
+            else {}
+        )
         ai_message = AIMessage(
             content=collected.content or "",
             tool_calls=collected.tool_calls or [],
+            additional_kwargs=additional_kwargs,
         )
         event_bus.emit(AgentEvent(
             type=EventType.TRANSCRIPT_MESSAGE,
@@ -134,6 +141,7 @@ def create_reasoning_node(
                 "role": "assistant",
                 "content": ai_message.content,
                 "tool_calls": ai_message.tool_calls or [],
+                "reasoning_content": reasoning_content,
             },
             turn=turn,
         ))
@@ -307,6 +315,39 @@ def _stream_with_events(
         raise err
 
     return collected
+
+
+def _prepare_history_for_model(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Keep reasoning_content only for assistant messages in the current tool loop."""
+    last_human_idx = -1
+    for idx, message in enumerate(messages):
+        if isinstance(message, HumanMessage):
+            last_human_idx = idx
+
+    prepared: list[BaseMessage] = []
+    for idx, message in enumerate(messages):
+        if isinstance(message, AIMessage):
+            reasoning_content = (message.additional_kwargs or {}).get("reasoning_content")
+            if reasoning_content and idx <= last_human_idx:
+                additional_kwargs = dict(message.additional_kwargs or {})
+                additional_kwargs.pop("reasoning_content", None)
+                prepared.append(AIMessage(
+                    content=message.content,
+                    tool_calls=message.tool_calls or [],
+                    additional_kwargs=additional_kwargs,
+                    id=message.id,
+                    response_metadata=getattr(message, "response_metadata", None) or {},
+                ))
+                continue
+        prepared.append(message)
+    return prepared
+
+
+def _extract_reasoning_content(response: AIMessageChunk) -> str | None:
+    reasoning_content = (response.additional_kwargs or {}).get("reasoning_content")
+    if isinstance(reasoning_content, str) and reasoning_content:
+        return reasoning_content
+    return None
 
 
 

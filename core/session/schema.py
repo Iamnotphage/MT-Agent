@@ -70,6 +70,7 @@ def make_transcript_message_record(
     role: str,
     content: Any,
     tool_calls: list[dict[str, Any]] | None = None,
+    reasoning_content: str | None = None,
     tool_call_id: str | None = None,
     name: str | None = None,
     tool_use_result: dict[str, Any] | None = None,
@@ -81,6 +82,7 @@ def make_transcript_message_record(
         "role": role,
         "content": content,
         "tool_calls": tool_calls or [],
+        "reasoning_content": reasoning_content,
         "tool_call_id": tool_call_id or "",
         "name": name or "",
         "toolUseResult": tool_use_result,
@@ -165,6 +167,7 @@ def normalize_transcript_record(record: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("role", "")
     normalized.setdefault("content", "")
     normalized.setdefault("tool_calls", [])
+    normalized.setdefault("reasoning_content", None)
     normalized.setdefault("tool_call_id", "")
     normalized.setdefault("name", "")
     normalized.setdefault("toolUseResult", None)

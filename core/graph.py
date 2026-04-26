@@ -22,6 +22,7 @@ def build_agent_graph(
     llm: BaseChatModel,
     event_bus: EventBus,
     tools: list[BaseTool],
+    session=None,
     checkpointer=None,
     context_manager: ContextManager | None = None,
     session_stats: SessionStats | None = None,
@@ -50,7 +51,7 @@ def build_agent_graph(
     tool_node = ToolNode(
         tools,
         handle_tool_errors=True,
-        wrap_tool_call=create_event_bus_wrapper(event_bus),
+        wrap_tool_call=create_event_bus_wrapper(event_bus, session=session),
     )
 
     graph = StateGraph(AgentState)

@@ -41,3 +41,20 @@ def test_stream_handler_records_approval_events(tmp_path):
     assert session._records[0]["tool_name"] == "write_file"
     assert session._records[1]["type"] == "approval_decision"
     assert session._records[1]["decisions"]["call_1"] is True
+
+
+def test_stream_handler_renders_thought_as_single_stream(tmp_path):
+    session = _make_session(tmp_path)
+    bus = EventBus()
+    console = Console(record=True, width=100)
+    handler = StreamHandler(console, bus, session)
+
+    bus.emit(AgentEvent(type=EventType.THOUGHT, data={"text": "The"}))
+    bus.emit(AgentEvent(type=EventType.THOUGHT, data={"text": " user"}))
+    bus.emit(AgentEvent(type=EventType.THOUGHT, data={"text": " wants"}))
+    handler.end_stream()
+
+    rendered = console.export_text()
+    assert "💭 The user wants" in rendered
+    assert rendered.count("💭") == 1
+    assert session._records == []

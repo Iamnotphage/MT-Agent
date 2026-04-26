@@ -293,6 +293,19 @@ def _render_resumed_history(console: Console, records: list[dict]) -> None:
                 console.print(line)
             elif role == "assistant":
                 content = record.get("content", "")
+                reasoning_content = record.get("reasoning_content", "")
+                if reasoning_content:
+                    rendered_thought = str(reasoning_content).replace("\n", "\n    ")
+                    console.print()
+                    console.print("  💭 ", end="", style="dim italic")
+                    console.print(
+                        rendered_thought,
+                        style="dim italic",
+                        end="",
+                        highlight=False,
+                        markup=False,
+                    )
+                    console.print()
                 if content:
                     indented = content.replace("\n", "\n  ")
                     console.print()

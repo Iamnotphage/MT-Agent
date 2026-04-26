@@ -221,9 +221,14 @@ class SessionRecorder:
             if role == "user":
                 messages.append(HumanMessage(content=content))
             elif role == "assistant":
+                additional_kwargs: dict[str, Any] = {}
+                reasoning_content = record.get("reasoning_content")
+                if reasoning_content:
+                    additional_kwargs["reasoning_content"] = reasoning_content
                 messages.append(AIMessage(
                     content=content,
                     tool_calls=record.get("tool_calls") or [],
+                    additional_kwargs=additional_kwargs,
                 ))
             elif role == "tool":
                 kwargs: dict[str, Any] = {

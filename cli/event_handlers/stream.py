@@ -48,6 +48,7 @@ class StreamHandler:
 
         # LLM 流式输出状态
         self._streaming = False
+        self._thought_streaming = False
         self._content_buf: list[str] = []
         self._thought_buf: list[str] = []
 
@@ -69,6 +70,7 @@ class StreamHandler:
         event_bus.subscribe(EventType.TOOL_CALL_REQUEST, self.on_tool_request)
         event_bus.subscribe(EventType.TOOL_CALL_COMPLETE, self.on_tool_complete)
         event_bus.subscribe(EventType.TOOL_LIVE_OUTPUT, self.on_tool_live_output)
+        event_bus.subscribe(EventType.TOOL_RESULT_PERSISTED, self.on_tool_result_persisted)
         event_bus.subscribe(EventType.CONTEXT_COMPRESSED, self.on_context_compressed)
         event_bus.subscribe(EventType.APPROVAL_REQUEST, self.on_approval_request)
         event_bus.subscribe(EventType.APPROVAL_RESPONSE, self.on_approval_response)
@@ -149,8 +151,10 @@ class StreamHandler:
         if self._streaming:
             self._console.print()
             self._streaming = False
+        if self._thought_streaming:
+            self._console.print()
+            self._thought_streaming = False
         if self._thought_buf:
-            self._session.record({"type": "thought", "text": "".join(self._thought_buf)})
             self._thought_buf.clear()
         if self._content_buf:
             self._content_buf.clear()
@@ -180,11 +184,20 @@ class StreamHandler:
         text = event.data.get("text", "")
         if not text:
             return
-        # 结束内容流，但不 flush 工具缓冲
-        self._end_content_stream()
-        # 渲染思考内容（灰色斜体）
-        self._console.print()
-        self._console.print(f"  [dim italic]💭 {text}[/dim italic]", highlight=False)
+
+        self._stop_thinking_animation()
+        if self._streaming:
+            self._console.print()
+            self._streaming = False
+
+        if not self._thought_streaming:
+            self._flush_tool_buffer()
+            self._console.print()
+            self._console.print("  💭 ", end="", style="dim italic")
+            self._thought_streaming = True
+
+        rendered = text.replace("\n", "\n    ")
+        self._console.print(rendered, end="", style="dim italic", highlight=False, markup=False)
         self._thought_buf.append(text)
 
     # ── 工具事件: 缓冲 → 批量渲染 ──────────────────────────────
@@ -255,6 +268,20 @@ class StreamHandler:
 
         if flush_now:
             self._flush_tool_buffer()
+
+    def on_tool_result_persisted(self, event: AgentEvent) -> None:
+        self._session.record({
+            "type": "tool_result_artifact",
+            "tool_call_id": event.data.get("call_id", ""),
+            "name": event.data.get("tool_name", ""),
+            "artifact": {
+                "path": event.data.get("path", ""),
+                "kind": "text",
+                "original_chars": event.data.get("original_chars", 0),
+                "preview_chars": event.data.get("preview_chars", 0),
+                "reason": event.data.get("reason", ""),
+            },
+        })
 
     # ── 渲染工具缓冲 ─────────────────────────────────────────────
 

@@ -89,6 +89,7 @@ def create_agent_runtime(
         llm=llm,
         event_bus=event_bus,
         tools=tools,
+        session=session,
         checkpointer=checkpointer,
         context_manager=ctx_manager,
         session_stats=session.stats,

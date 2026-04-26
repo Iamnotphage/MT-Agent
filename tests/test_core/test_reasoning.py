@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
 from core.event_bus import EventType
 from core.context.compressor import ContextCompressor
@@ -208,6 +208,49 @@ class TestReasoningNode:
         assert stats.last_effective_context_limit > 0
         assert stats.last_auto_compact_threshold > 0
         assert stats.last_tokens_until_compact >= 0
+
+    def test_reasoning_content_is_preserved_for_tool_loop(self, event_bus):
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+        llm.stream.return_value = iter([
+            AIMessageChunk(
+                content="",
+                additional_kwargs={"reasoning_content": "need more tool work"},
+                tool_call_chunks=[{
+                    "name": "read_file",
+                    "args": '{"path": "a.py"}',
+                    "id": "call_123",
+                    "index": 0,
+                }],
+            )
+        ])
+
+        node = create_reasoning_node(llm, event_bus)
+        state = {"messages": [HumanMessage(content="inspect file")], "turn_count": 0}
+        result = node(state)
+
+        assistant = result["messages"][0]
+        assert assistant.additional_kwargs["reasoning_content"] == "need more tool work"
+
+    def test_old_reasoning_content_is_cleared_after_new_user_turn(self, event_bus, mock_llm_text):
+        node = create_reasoning_node(mock_llm_text, event_bus)
+        history = [
+            HumanMessage(content="question 1"),
+            AIMessage(
+                content="tool step",
+                tool_calls=[{"name": "glob", "args": {}, "id": "call_1", "type": "tool_call"}],
+                additional_kwargs={"reasoning_content": "old chain"},
+            ),
+            HumanMessage(content="question 2"),
+        ]
+        state = {"messages": history, "turn_count": 1}
+
+        node(state)
+
+        streamed_messages = mock_llm_text.stream.call_args.args[0]
+        assistant_history = streamed_messages[-2]
+        assert isinstance(assistant_history, AIMessage)
+        assert "reasoning_content" not in (assistant_history.additional_kwargs or {})
 
 
 class TestShouldUseTools:

@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Callable
 
 from langchain_core.messages import ToolMessage
 
+from core.context.tool_results import (
+    MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
+    ToolResultCandidate,
+    apply_aggregate_budget,
+    apply_transcript_metadata,
+    candidate_from_tool_message,
+    get_tool_result_threshold,
+    maybe_persist_tool_result,
+)
 from core.event_bus import AgentEvent, EventBus, EventType
 
 logger = logging.getLogger(__name__)
 
 
-def create_event_bus_wrapper(event_bus: EventBus) -> Callable:
+def create_event_bus_wrapper(event_bus: EventBus, session=None) -> Callable:
     """创建 ToolNode wrap_tool_call，在工具执行前后发送 EventBus 事件
 
     利用 response_format="content_and_artifact" 机制：
@@ -21,7 +31,12 @@ def create_event_bus_wrapper(event_bus: EventBus) -> Callable:
     无需通过实例属性传递，线程安全。
     """
 
+    batch_lock = threading.Lock()
+    batch_candidates: dict[str, ToolResultCandidate] = {}
+    active_count = 0
+
     def wrapper(request, execute):
+        nonlocal active_count
         tc = request.tool_call
         tool_name = tc["name"]
         call_id = tc["id"]
@@ -35,6 +50,9 @@ def create_event_bus_wrapper(event_bus: EventBus) -> Callable:
             data={"call_id": call_id, "tool_name": tool_name, "status": "executing"},
         ))
 
+        with batch_lock:
+            active_count += 1
+
         result = execute(request)
 
         elapsed = time.time() - start_time
@@ -44,6 +62,9 @@ def create_event_bus_wrapper(event_bus: EventBus) -> Callable:
         status = "success"
         display = ""
         error_msg = ""
+        transcript_payload: dict | None = None
+        persisted_event: dict | None = None
+        pending_batch_events: list[tuple[str, dict]] = []
 
         if isinstance(result, ToolMessage):
             if result.status == "error":
@@ -63,6 +84,92 @@ def create_event_bus_wrapper(event_bus: EventBus) -> Callable:
                         },
                     ))
 
+            if session is not None:
+                content = str(result.content or "")
+                threshold = get_tool_result_threshold(tool_name)
+                decision = maybe_persist_tool_result(
+                    tool_name=tool_name,
+                    tool_call_id=call_id,
+                    content=content,
+                    display=display,
+                    artifact_dir=session.get_artifact_dir(),
+                    artifact_path=session.get_tool_result_artifact_path(call_id),
+                    threshold=threshold,
+                    reason="per-tool-limit",
+                )
+                result.content = decision.content
+                apply_transcript_metadata(
+                    result,
+                    display=display,
+                    tool_use_result=decision.tool_use_result,
+                    artifact_meta=decision.artifact_meta,
+                )
+                if decision.persisted:
+                    persisted_event = {
+                        "call_id": call_id,
+                        "tool_name": tool_name,
+                        "path": decision.artifact_meta["path"],
+                        "original_chars": decision.original_chars,
+                        "preview_chars": decision.tool_use_result["preview_chars"],
+                        "reason": decision.reason,
+                    }
+
+                candidate = candidate_from_tool_message(
+                    tool_name=tool_name,
+                    tool_call_id=call_id,
+                    tool_message=result,
+                )
+                with batch_lock:
+                    batch_candidates[call_id] = candidate
+                    active_count -= 1
+                    if active_count == 0 and batch_candidates:
+                        aggregate_decisions = apply_aggregate_budget(
+                            list(batch_candidates.values()),
+                            artifact_dir=session.get_artifact_dir(),
+                            artifact_path_for_call=session.get_tool_result_artifact_path,
+                            aggregate_limit=MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
+                        )
+                        for aggregate_decision in aggregate_decisions:
+                            aggregate_candidate = batch_candidates[aggregate_decision.tool_call_id]
+                            aggregate_candidate.tool_message.content = aggregate_decision.content
+                            apply_transcript_metadata(
+                                aggregate_candidate.tool_message,
+                                display=aggregate_candidate.display,
+                                tool_use_result=aggregate_decision.tool_use_result,
+                                artifact_meta=aggregate_decision.artifact_meta,
+                            )
+                            pending_batch_events.append((
+                                "persisted",
+                                {
+                                    "call_id": aggregate_decision.tool_call_id,
+                                    "tool_name": aggregate_decision.tool_name,
+                                    "path": aggregate_decision.artifact_meta["path"],
+                                    "original_chars": aggregate_decision.original_chars,
+                                    "preview_chars": aggregate_decision.tool_use_result["preview_chars"],
+                                    "reason": aggregate_decision.reason,
+                                },
+                            ))
+                        for candidate in batch_candidates.values():
+                            artifact = dict(candidate.tool_message.artifact or {})
+                            pending_batch_events.append((
+                                "transcript",
+                                {
+                                    "role": "tool",
+                                    "content": str(candidate.tool_message.content or ""),
+                                    "tool_call_id": candidate.tool_call_id,
+                                    "name": candidate.tool_name,
+                                    "toolUseResult": artifact.get("toolUseResult"),
+                                    "artifact": artifact.get("artifact_meta"),
+                                },
+                            ))
+                        batch_candidates.clear()
+            else:
+                with batch_lock:
+                    active_count -= 1
+        else:
+            with batch_lock:
+                active_count -= 1
+
         # ── complete ──
         event_bus.emit(AgentEvent(
             type=EventType.TOOL_CALL_COMPLETE,
@@ -74,6 +181,23 @@ def create_event_bus_wrapper(event_bus: EventBus) -> Callable:
                 "error_msg": error_msg,
             },
         ))
+
+        if persisted_event is not None:
+            event_bus.emit(AgentEvent(
+                type=EventType.TOOL_RESULT_PERSISTED,
+                data=persisted_event,
+            ))
+        for event_kind, payload in pending_batch_events:
+            if event_kind == "persisted":
+                event_bus.emit(AgentEvent(
+                    type=EventType.TOOL_RESULT_PERSISTED,
+                    data=payload,
+                ))
+            elif event_kind == "transcript":
+                event_bus.emit(AgentEvent(
+                    type=EventType.TRANSCRIPT_MESSAGE,
+                    data=payload,
+                ))
 
         return result
 

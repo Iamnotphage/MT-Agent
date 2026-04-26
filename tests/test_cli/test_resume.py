@@ -189,3 +189,20 @@ def test_cmd_resume_warns_when_checkpoint_and_transcript_diverge(monkeypatch, tm
 
     assert thread_id == "thread-restore"
     assert "历史长度不一致" in console.export_text()
+
+
+def test_render_resumed_history_uses_assistant_reasoning_content():
+    console = Console(record=True, width=100)
+
+    resume_mod._render_resumed_history(console, [
+        {
+            "type": "transcript_message",
+            "role": "assistant",
+            "content": "I found the file.",
+            "reasoning_content": "I should read the file first.",
+        }
+    ])
+
+    rendered = console.export_text()
+    assert "💭 I should read the file first." in rendered
+    assert "⏺ I found the file." in rendered
