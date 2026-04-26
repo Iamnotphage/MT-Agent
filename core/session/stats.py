@@ -20,6 +20,11 @@ class SessionStats:
     total_output_tokens: int = 0
     total_tokens: int = 0
     last_input_tokens: int = 0
+    last_effective_context_limit: int = 0
+    last_auto_compact_threshold: int = 0
+    last_tokens_until_compact: int = 0
+    last_tool_result_chars: int = 0
+    compression_failure_count: int = 0
 
     turn_count: int = 0
     prompt_count: int = 0
@@ -61,6 +66,14 @@ class SessionStats:
                 "input": self.total_input_tokens,
                 "output": self.total_output_tokens,
                 "total": self.total_tokens,
+            },
+            "context": {
+                "last_input_tokens": self.last_input_tokens,
+                "effective_context_limit": self.last_effective_context_limit,
+                "auto_compact_threshold": self.last_auto_compact_threshold,
+                "tokens_until_compact": self.last_tokens_until_compact,
+                "last_tool_result_chars": self.last_tool_result_chars,
+                "compression_failure_count": self.compression_failure_count,
             },
             "tools": {
                 "total": self.tool_calls_total,

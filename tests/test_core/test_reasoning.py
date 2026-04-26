@@ -192,6 +192,23 @@ class TestReasoningNode:
         assert result["messages"][1].id == "m2"
         assert "conversation_history_summary" in result["messages"][2].content
 
+    def test_context_budget_stats_updated(self, event_bus, mock_llm_text):
+        """reasoning 会更新当前上下文预算统计。"""
+        stats = SessionStats()
+        node = create_reasoning_node(
+            mock_llm_text,
+            event_bus,
+            session_stats=stats,
+        )
+        state = {"messages": [HumanMessage(content="hello")], "turn_count": 0}
+
+        node(state)
+
+        assert stats.last_input_tokens > 0
+        assert stats.last_effective_context_limit > 0
+        assert stats.last_auto_compact_threshold > 0
+        assert stats.last_tokens_until_compact >= 0
+
 
 class TestShouldUseTools:
     """条件路由函数测试"""

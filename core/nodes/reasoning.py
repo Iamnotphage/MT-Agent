@@ -16,6 +16,8 @@ from typing import Any, Callable
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, RemoveMessage, SystemMessage
 
+from config.settings import CONTEXT as CONTEXT_CONFIG
+from core.context.budget import budget_snapshot
 from core.event_bus import AgentEvent, EventBus, EventType
 from core.state import AgentState, ToolCallInfo
 from prompts.system_prompt import build_system_prompt
@@ -83,15 +85,7 @@ def create_reasoning_node(
 
         # 3) 估算当前 messages 的 token 数并更新统计，让压缩检查基于当前轮
         if session_stats is not None:
-            from core.utils.tokens import estimate_tokens
-            total = 0
-            for msg in messages:
-                role = getattr(msg, "type", "")
-                content = msg.content
-                if isinstance(content, list):
-                    content = str(content)
-                total += estimate_tokens(f"[{role}] {content}")
-            session_stats.last_input_tokens = total
+            total = _update_context_budget_stats(messages, session_stats)
             logger.debug("Estimated input tokens: %d", total)
 
         # 4) 压缩检查 — 基于刚估算的 token 数决定是否压缩
@@ -110,15 +104,7 @@ def create_reasoning_node(
                         messages.append(HumanMessage(content=session_ctx))
                 messages.extend(compress_result.compressed_messages)
                 # 重新估算压缩后的 token 数
-                from core.utils.tokens import estimate_tokens
-                total = 0
-                for msg in messages:
-                    role = getattr(msg, "type", "")
-                    content = msg.content
-                    if isinstance(content, list):
-                        content = str(content)
-                    total += estimate_tokens(f"[{role}] {content}")
-                session_stats.last_input_tokens = total
+                total = _update_context_budget_stats(messages, session_stats)
                 logger.debug("Estimated tokens after compression: %d", total)
 
         # 5) 流式调用 LLM, 逐 chunk 发送 EventBus 事件
@@ -132,6 +118,10 @@ def create_reasoning_node(
         # 6) 收集 token usage → SessionStats
         if session_stats is not None:
             _record_token_usage(collected, session_stats)
+            _update_context_budget_stats_from_count(
+                session_stats.last_input_tokens,
+                session_stats,
+            )
 
         # 7) 构造 AIMessage 写入 state.messages 历史
         ai_message = AIMessage(
@@ -374,6 +364,52 @@ def _record_token_usage(
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=usage.get("completion_tokens", 0),
         )
+
+
+def _update_context_budget_stats(
+    messages: list,
+    session_stats: SessionStats,
+) -> int:
+    """Recompute current context budget stats from the message list."""
+    snapshot = budget_snapshot(
+        messages,
+        token_limit=CONTEXT_CONFIG["token_limit"],
+        reserved_summary_tokens=CONTEXT_CONFIG["summary_reserved_tokens"],
+        buffer_tokens=CONTEXT_CONFIG["autocompact_buffer_tokens"],
+    )
+    _apply_budget_snapshot(snapshot, session_stats)
+    return snapshot["raw_input_tokens"]
+
+
+def _update_context_budget_stats_from_count(
+    raw_input_tokens: int,
+    session_stats: SessionStats,
+) -> None:
+    """Refresh derived budget stats using an already known token count."""
+    compact_threshold = budget_snapshot(
+        [],
+        token_limit=CONTEXT_CONFIG["token_limit"],
+        reserved_summary_tokens=CONTEXT_CONFIG["summary_reserved_tokens"],
+        buffer_tokens=CONTEXT_CONFIG["autocompact_buffer_tokens"],
+    )
+    session_stats.last_input_tokens = raw_input_tokens
+    session_stats.last_effective_context_limit = compact_threshold["effective_context_limit"]
+    session_stats.last_auto_compact_threshold = compact_threshold["auto_compact_threshold"]
+    session_stats.last_tokens_until_compact = max(
+        compact_threshold["auto_compact_threshold"] - raw_input_tokens,
+        0,
+    )
+
+
+def _apply_budget_snapshot(
+    snapshot: dict[str, int],
+    session_stats: SessionStats,
+) -> None:
+    """Apply a computed budget snapshot to session stats."""
+    session_stats.last_input_tokens = snapshot["raw_input_tokens"]
+    session_stats.last_effective_context_limit = snapshot["effective_context_limit"]
+    session_stats.last_auto_compact_threshold = snapshot["auto_compact_threshold"]
+    session_stats.last_tokens_until_compact = snapshot["tokens_until_compact"]
 
 
 def _maybe_compress(

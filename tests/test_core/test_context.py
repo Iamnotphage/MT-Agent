@@ -92,6 +92,11 @@ class TestSessionStats:
         assert ss.total_tokens == 0
         assert ss.turn_count == 0
         assert ss.tool_calls_total == 0
+        assert ss.last_effective_context_limit == 0
+        assert ss.last_auto_compact_threshold == 0
+        assert ss.last_tokens_until_compact == 0
+        assert ss.last_tool_result_chars == 0
+        assert ss.compression_failure_count == 0
 
     def test_record_llm_usage(self):
         ss = SessionStats()
@@ -116,12 +121,19 @@ class TestSessionStats:
     def test_to_dict(self):
         ss = SessionStats()
         ss.record_llm_usage(100, 50, "test-model")
+        ss.last_effective_context_limit = 111072
+        ss.last_auto_compact_threshold = 98072
+        ss.last_tokens_until_compact = 97000
         d = ss.to_dict()
         assert d["model"] == "test-model"
         assert d["tokens"]["input"] == 100
         assert d["tokens"]["output"] == 50
         assert d["tokens"]["total"] == 150
         assert d["turns"] == 1
+        assert d["context"]["last_input_tokens"] == 100
+        assert d["context"]["effective_context_limit"] == 111072
+        assert d["context"]["auto_compact_threshold"] == 98072
+        assert d["context"]["tokens_until_compact"] == 97000
 
     def test_duration(self):
         ss = SessionStats()
@@ -371,6 +383,8 @@ class TestSessionHistory:
         """自动添加 timestamp。"""
         recorder.record({"type": "transcript_message", "role": "user", "content": "test"})
         assert "timestamp" in recorder._records[0]
+        assert recorder._records[0]["toolUseResult"] is None
+        assert recorder._records[0]["artifact"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +631,40 @@ class TestSessionListAndLoad:
         assert messages[1].tool_calls[0]["name"] == "read_file"
         assert messages[2].tool_call_id == "call_1"
         assert messages[2].content == "file content"
+
+    def test_build_resume_messages_accepts_new_tool_fields(self, recorder):
+        """新 transcript 字段不应破坏 ToolMessage 恢复。"""
+        recorder.record({
+            "type": "transcript_message",
+            "role": "tool",
+            "content": "preview",
+            "tool_call_id": "call_1",
+            "name": "grep",
+            "toolUseResult": {
+                "kind": "text",
+                "artifact": "tool-results/call_1.txt",
+                "truncated": True,
+            },
+            "artifact": {
+                "path": "tool-results/call_1.txt",
+            },
+        })
+        filepath = recorder.flush()
+
+        messages = recorder.build_resume_messages(filepath)
+
+        assert len(messages) == 1
+        assert messages[0].tool_call_id == "call_1"
+        assert messages[0].content == "preview"
+
+    def test_get_artifact_dir_uses_session_id(self, recorder):
+        path = recorder.get_artifact_dir()
+        assert path.name == recorder.stats.session_id
+
+    def test_get_tool_result_artifact_path(self, recorder):
+        path = recorder.get_tool_result_artifact_path("call_1")
+        assert path.name == "call_1.txt"
+        assert "tool-results" in path.as_posix()
 
     def test_estimate_messages_tokens_returns_positive_value(self, recorder):
         """估算 resume 消息 token 数，用于初始 context 占比。"""

@@ -30,6 +30,14 @@ CONTEXT = {
     "compression_preserve_ratio": 0.30,
     # Token limit: 模型的 context window 大小（默认值，可被运行时覆盖）
     "token_limit": 131072,
+    # 为 compact 摘要输出预留的 token 数
+    "summary_reserved_tokens": 20000,
+    # 自动压缩触发阈值的安全缓冲
+    "autocompact_buffer_tokens": 13000,
+    # 后续消息保留区的最小 token 目标
+    "compression_preserve_min_tokens": 10000,
+    # 后续消息保留区的最大 token 目标
+    "compression_preserve_max_tokens": 40000,
 }
 
 
@@ -46,5 +54,4 @@ def load_llm_config() -> LLMConfig:
         base_url=os.environ.get("LLM_BASE_URL", "").strip(),
         model=os.environ.get("MODEL_NAME", "").strip(),
     )
-
 

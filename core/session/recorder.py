@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import subprocess
@@ -14,21 +13,27 @@ from typing import Any
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from core.context.compressor import ContextCompressor
+from core.session.artifacts import (
+    get_history_dir,
+    get_session_artifact_dir,
+    get_session_memory_dir,
+    get_tool_result_path,
+)
+from core.session.schema import (
+    RECORD_COMPRESSION,
+    RECORD_SESSION_END,
+    RECORD_SESSION_START,
+    get_record_type,
+    is_renderable_record,
+    is_transcript_message_record,
+    make_session_end_record,
+    make_session_start_record,
+    normalize_transcript_record,
+)
 from core.session.stats import SessionStats
 from core.utils.tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
-
-_RENDERABLE_TYPES = {
-    "thought",
-    "tool_request",
-    "tool_complete",
-    "tool_diff",
-    "tool_call",
-    "approval_request",
-    "approval_decision",
-    "transcript_message",
-}
 
 
 def format_relative_time(timestamp_ms: int) -> str:
@@ -73,6 +78,8 @@ class SessionRecorder:
 
     def record(self, record: dict) -> None:
         """记录一条会话消息（追加到内存缓冲区）。"""
+        if is_transcript_message_record(record):
+            record = normalize_transcript_record(record)
         if "timestamp" not in record:
             record["timestamp"] = int(time.time() * 1000)
         self._records.append(record)
@@ -91,23 +98,21 @@ class SessionRecorder:
             all_records.extend(self.load_raw_session(self._resumed_from))
         all_records.extend(self._records)
 
-        start_record = {
-            "type": "session_start",
-            "sessionId": self.stats.session_id,
-            "threadId": self._thread_id,
-            "project": str(self._working_dir),
-            "model": self.stats.model,
-            "branch": self._get_git_branch(),
-            "timestamp": int(self.stats.start_time * 1000),
-        }
+        start_record = make_session_start_record(
+            session_id=self.stats.session_id,
+            thread_id=self._thread_id,
+            project=str(self._working_dir),
+            model=self.stats.model,
+            branch=self._get_git_branch(),
+            timestamp=int(self.stats.start_time * 1000),
+        )
 
-        end_record = {
-            "type": "session_end",
-            "sessionId": self.stats.session_id,
-            "threadId": self._thread_id,
-            "stats": self.stats.to_dict(),
-            "timestamp": int(time.time() * 1000),
-        }
+        end_record = make_session_end_record(
+            session_id=self.stats.session_id,
+            thread_id=self._thread_id,
+            stats=self.stats.to_dict(),
+            timestamp=int(time.time() * 1000),
+        )
 
         history_dir = self._get_history_dir()
         history_dir.mkdir(parents=True, exist_ok=True)
@@ -154,7 +159,7 @@ class SessionRecorder:
 
     def load_session(self, filepath: Path) -> list[dict]:
         """加载指定会话文件的渲染记录（不含 session_start/session_end）。"""
-        return [record for record in self.load_raw_session(filepath) if record.get("type") in _RENDERABLE_TYPES]
+        return [record for record in self.load_raw_session(filepath) if is_renderable_record(record)]
 
     def load_raw_session(self, filepath: Path) -> list[dict]:
         """加载指定会话文件中的全部业务记录（不含 session_start/session_end）。"""
@@ -165,7 +170,10 @@ class SessionRecorder:
                 continue
             try:
                 record = json.loads(line)
-                if record.get("type") not in {"session_start", "session_end"}:
+                rtype = get_record_type(record)
+                if rtype not in {RECORD_SESSION_START, RECORD_SESSION_END}:
+                    if is_transcript_message_record(record):
+                        record = normalize_transcript_record(record)
                     records.append(record)
             except json.JSONDecodeError:
                 continue
@@ -178,7 +186,7 @@ class SessionRecorder:
         last_compression_idx = -1
         summary_text = ""
         for idx, record in enumerate(records):
-            if record.get("type") == "compression":
+            if get_record_type(record) == RECORD_COMPRESSION:
                 last_compression_idx = idx
                 summary_text = str(record.get("summary", "")).strip()
 
@@ -188,7 +196,7 @@ class SessionRecorder:
 
         start_idx = last_compression_idx + 1 if last_compression_idx >= 0 else 0
         tail_records = records[start_idx:]
-        transcript_records = [r for r in tail_records if r.get("type") == "transcript_message"]
+        transcript_records = [r for r in tail_records if is_transcript_message_record(r)]
         resumed.extend(self._build_messages_from_transcript(transcript_records))
         return resumed
 
@@ -207,6 +215,7 @@ class SessionRecorder:
     def _build_messages_from_transcript(records: list[dict]) -> list[BaseMessage]:
         messages: list[BaseMessage] = []
         for record in records:
+            record = normalize_transcript_record(record)
             role = record.get("role")
             content = record.get("content", "")
             if role == "user":
@@ -246,7 +255,7 @@ class SessionRecorder:
                 continue
 
             rtype = record.get("type", "")
-            if rtype == "session_start":
+            if rtype == RECORD_SESSION_START:
                 session_id = record.get("sessionId", "")
                 thread_id = record.get("threadId", "")
                 model = record.get("model", "")
@@ -255,7 +264,7 @@ class SessionRecorder:
             else:
                 records.append(record)
 
-        transcript_records = [r for r in records if r.get("type") == "transcript_message"]
+        transcript_records = [normalize_transcript_record(r) for r in records if is_transcript_message_record(r)]
         first_user_msg = ""
         message_count = 0
         for record in transcript_records:
@@ -287,9 +296,33 @@ class SessionRecorder:
 
     def _get_history_dir(self) -> Path:
         """会话历史目录: ~/.mtagent/history/{projectHash}/"""
-        global_dir = Path(self._config.get("global_dir", "~/.mtagent")).expanduser()
-        project_hash = hashlib.md5(str(self._working_dir).encode()).hexdigest()[:10]
-        return global_dir / "history" / project_hash
+        return get_history_dir(str(self._working_dir), self._config)
+
+    def get_artifact_dir(self) -> Path:
+        """当前 session 的 artifact 根目录。"""
+        return get_session_artifact_dir(
+            str(self._working_dir),
+            self._config,
+            self.stats.session_id,
+        )
+
+    def get_tool_result_artifact_path(self, tool_call_id: str, suffix: str = ".txt") -> Path:
+        """当前 session 下某个工具结果的 artifact 路径。"""
+        return get_tool_result_path(
+            str(self._working_dir),
+            self._config,
+            self.stats.session_id,
+            tool_call_id,
+            suffix=suffix,
+        )
+
+    def get_session_memory_artifact_dir(self) -> Path:
+        """当前 session 的 session-memory 目录。"""
+        return get_session_memory_dir(
+            str(self._working_dir),
+            self._config,
+            self.stats.session_id,
+        )
 
     def get_checkpoint_path(self) -> Path:
         """当前项目的 LangGraph checkpoint SQLite 文件路径。"""
