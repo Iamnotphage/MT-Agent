@@ -37,7 +37,7 @@ class App:
             runtime = create_agent_runtime()
         except Exception as e:
             self.console.print(f"  [red]Agent 初始化失败:[/red] {e}")
-            self.console.print("  [dim]请检查 config.json 或环境变量配置[/dim]\n")
+            self.console.print("  [dim]请检查 .env文件或环境变量配置[/dim]\n")
             return
 
         self.console.print(f"  [dim]工作目录  {runtime.workspace}[/dim]")
