@@ -7,7 +7,7 @@ from core.context.compressor import ContextCompressor
 
 def test_compress_includes_boundary_and_summary():
     llm = MagicMock()
-    llm.invoke.return_value = MagicMock(content="summary text")
+    llm.invoke.return_value = MagicMock(content="<analysis>scratch</analysis>\n<summary>summary text</summary>")
     compressor = ContextCompressor(
         llm,
         preserve_min_tokens=1,
@@ -24,5 +24,7 @@ def test_compress_includes_boundary_and_summary():
     assert result is not None
     assert result.boundary_message.content.startswith("<compact_boundary ")
     assert "conversation_history_summary" in result.summary_message.content
+    assert "<analysis>" not in result.summary_message.content
+    assert "summary text" in result.summary_message.content
     assert result.compressed_messages[0].content.startswith("<compact_boundary ")
     assert "conversation_history_summary" in result.compressed_messages[1].content

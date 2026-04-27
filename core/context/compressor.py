@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from langchain_core.messages import (
@@ -21,7 +22,7 @@ from langchain_core.messages import (
 )
 from core.context.budget import estimate_message_tokens
 from core.context.message_invariants import find_compaction_working_start, find_safe_split_index
-from prompts.compression_prompt import COMPRESSION_SYSTEM_PROMPT
+from prompts.compression_prompt import COMPACT_SYSTEM_PROMPT
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
@@ -164,11 +165,11 @@ class ContextCompressor:
             )
 
         compress_messages = [
-            SystemMessage(content=COMPRESSION_SYSTEM_PROMPT),
+            SystemMessage(content=COMPACT_SYSTEM_PROMPT),
             HumanMessage(
                 content=(
-                    "Please compress the following conversation history "
-                    "into a structured snapshot (max 500 words):\n\n"
+                    "Create a detailed compact summary of the following conversation history. "
+                    "Follow the required <analysis> and <summary> structure exactly.\n\n"
                     f"{conversation_text}"
                 ),
             ),
@@ -176,7 +177,8 @@ class ContextCompressor:
 
         try:
             response = self._llm.invoke(compress_messages)
-            summary = response.content.strip() if response.content else ""
+            raw_response = response.content.strip() if response.content else ""
+            summary = _extract_compact_summary(raw_response)
 
             # 检查摘要大小，如果太大则截断
             summary_tokens = estimate_tokens(summary)
@@ -261,3 +263,12 @@ def _truncate(text: str | list, max_len: int = 500) -> str:
     if len(text) <= max_len:
         return text
     return text[:max_len] + f"... ({len(text)} chars total)"
+
+
+def _extract_compact_summary(text: str) -> str:
+    if not text:
+        return ""
+    match = re.search(r"<summary>\s*(.*?)\s*</summary>", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
