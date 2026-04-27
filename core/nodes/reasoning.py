@@ -238,6 +238,7 @@ def _stream_with_events(
     """
 
     collected: AIMessageChunk | None = None
+    reasoning_parts: list[str] = []
 
     try:
         for chunk in llm.stream(messages):
@@ -254,6 +255,7 @@ def _stream_with_events(
             # 思考过程 → THOUGHT (DeepSeek-R1 等模型的 reasoning_content)
             reasoning = (chunk.additional_kwargs or {}).get("reasoning_content")
             if reasoning:
+                reasoning_parts.append(reasoning)
                 event_bus.emit(AgentEvent(
                     type=EventType.THOUGHT,
                     data={"text": reasoning},
@@ -343,6 +345,19 @@ def _stream_with_events(
             turn=turn,
         ))
         raise err
+
+    if reasoning_parts:
+        merged_reasoning = "".join(reasoning_parts)
+        additional_kwargs = dict(collected.additional_kwargs or {})
+        additional_kwargs["reasoning_content"] = merged_reasoning
+        collected = AIMessageChunk(
+            content=collected.content,
+            additional_kwargs=additional_kwargs,
+            tool_call_chunks=getattr(collected, "tool_call_chunks", None),
+            tool_calls=getattr(collected, "tool_calls", None),
+            response_metadata=getattr(collected, "response_metadata", None),
+            usage_metadata=getattr(collected, "usage_metadata", None),
+        )
 
     return collected
 
