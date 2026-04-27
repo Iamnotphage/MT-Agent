@@ -110,13 +110,15 @@ def make_compression_record(
 def make_compact_boundary_record(
     *,
     reason: str,
-    summary: str = "",
+    pre_tokens: int = 0,
+    post_tokens: int = 0,
     timestamp: int | None = None,
 ) -> dict[str, Any]:
     return {
         "type": RECORD_COMPACT_BOUNDARY,
         "reason": reason,
-        "summary": summary,
+        "pre_tokens": pre_tokens,
+        "post_tokens": post_tokens,
         "timestamp": _timestamp(timestamp),
     }
 
@@ -172,6 +174,17 @@ def normalize_transcript_record(record: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("name", "")
     normalized.setdefault("toolUseResult", None)
     normalized.setdefault("artifact", None)
+    if "timestamp" not in normalized:
+        normalized["timestamp"] = _timestamp()
+    return normalized
+
+
+def normalize_compact_boundary_record(record: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(record)
+    normalized["type"] = RECORD_COMPACT_BOUNDARY
+    normalized.setdefault("reason", "auto")
+    normalized.setdefault("pre_tokens", 0)
+    normalized.setdefault("post_tokens", 0)
     if "timestamp" not in normalized:
         normalized["timestamp"] = _timestamp()
     return normalized

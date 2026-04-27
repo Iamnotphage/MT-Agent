@@ -170,6 +170,8 @@ class TestReasoningNode:
             token_limit=100,
             threshold=0.5,
             preserve_ratio=0.3,
+            preserve_min_tokens=1,
+            preserve_max_tokens=1000,
         )
         stats = SessionStats(last_input_tokens=80)
 
@@ -193,12 +195,13 @@ class TestReasoningNode:
             result = node(state)
 
             streamed_messages = llm.stream.call_args.args[0]
-            assert "conversation_history_summary" in streamed_messages[1].content
-            assert streamed_messages[2].content == "u3"
-            assert streamed_messages[3].content == "u4"
+            assert streamed_messages[1].content.startswith("<compact_boundary ")
+            assert "conversation_history_summary" in streamed_messages[2].content
+            assert streamed_messages[-1].content == "u4"
             assert result["messages"][0].id == "m1"
-            assert result["messages"][1].id == "m2"
-            assert "conversation_history_summary" in result["messages"][2].content
+            assert result["messages"][1].id in {"m2", "m3"}
+            assert result["messages"][-3].content.startswith("<compact_boundary ")
+            assert "conversation_history_summary" in result["messages"][-2].content
         finally:
             CONTEXT_CONFIG["token_limit"] = old_limit
             CONTEXT_CONFIG["summary_reserved_tokens"] = old_reserved

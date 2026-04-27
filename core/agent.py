@@ -79,6 +79,8 @@ def create_agent_runtime(
         token_limit=CONTEXT_CONFIG.get("token_limit", 65536),
         threshold=CONTEXT_CONFIG.get("compression_threshold", 0.50),
         preserve_ratio=CONTEXT_CONFIG.get("compression_preserve_ratio", 0.30),
+        preserve_min_tokens=CONTEXT_CONFIG.get("compression_preserve_min_tokens", 10000),
+        preserve_max_tokens=CONTEXT_CONFIG.get("compression_preserve_max_tokens", 40000),
     )
 
     checkpoint_path = session.get_checkpoint_path()

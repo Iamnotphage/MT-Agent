@@ -78,3 +78,17 @@ def test_tool_result_persisted_event_is_not_recorded_separately(tmp_path):
     ))
 
     assert session._records == []
+
+
+def test_compact_boundary_event_is_recorded(tmp_path):
+    session = _make_session(tmp_path)
+    bus = EventBus()
+    StreamHandler(Console(record=True, width=100), bus, session)
+
+    bus.emit(AgentEvent(
+        type=EventType.COMPACT_BOUNDARY,
+        data={"reason": "auto", "pre_tokens": 100, "post_tokens": 20},
+    ))
+
+    assert session._records[0]["type"] == "compact_boundary"
+    assert session._records[0]["pre_tokens"] == 100

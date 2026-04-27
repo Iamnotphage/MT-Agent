@@ -20,6 +20,7 @@ from core.session.artifacts import (
     get_tool_result_path,
 )
 from core.session.schema import (
+    RECORD_COMPACT_BOUNDARY,
     RECORD_COMPRESSION,
     RECORD_SESSION_END,
     RECORD_SESSION_START,
@@ -28,6 +29,7 @@ from core.session.schema import (
     is_transcript_message_record,
     make_session_end_record,
     make_session_start_record,
+    normalize_compact_boundary_record,
     normalize_transcript_record,
 )
 from core.session.stats import SessionStats
@@ -185,16 +187,28 @@ class SessionRecorder:
 
         last_compression_idx = -1
         summary_text = ""
+        boundary_record: dict[str, Any] | None = None
+        last_boundary_idx = -1
         for idx, record in enumerate(records):
-            if get_record_type(record) == RECORD_COMPRESSION:
+            rtype = get_record_type(record)
+            if rtype == RECORD_COMPRESSION:
                 last_compression_idx = idx
                 summary_text = str(record.get("summary", "")).strip()
+            elif rtype == RECORD_COMPACT_BOUNDARY:
+                last_boundary_idx = idx
+                boundary_record = normalize_compact_boundary_record(record)
 
         resumed: list[BaseMessage] = []
+        if boundary_record:
+            resumed.append(ContextCompressor.build_compact_boundary_message(
+                pre_tokens=int(boundary_record.get("pre_tokens", 0) or 0),
+                post_tokens=int(boundary_record.get("post_tokens", 0) or 0),
+                reason=str(boundary_record.get("reason", "auto") or "auto"),
+            ))
         if summary_text:
             resumed.append(ContextCompressor.build_summary_message(summary_text))
 
-        start_idx = last_compression_idx + 1 if last_compression_idx >= 0 else 0
+        start_idx = max(last_compression_idx, last_boundary_idx) + 1 if (last_compression_idx >= 0 or last_boundary_idx >= 0) else 0
         tail_records = records[start_idx:]
         transcript_records = [r for r in tail_records if is_transcript_message_record(r)]
         resumed.extend(self._build_messages_from_transcript(transcript_records))

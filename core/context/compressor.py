@@ -19,6 +19,8 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from core.context.budget import estimate_message_tokens
+from core.context.message_invariants import find_compaction_working_start, find_safe_split_index
 from prompts.compression_prompt import COMPRESSION_SYSTEM_PROMPT
 
 if TYPE_CHECKING:
@@ -37,11 +39,15 @@ class ContextCompressor:
         token_limit: int = 65536,
         threshold: float = 0.50,
         preserve_ratio: float = 0.30,
+        preserve_min_tokens: int = 10_000,
+        preserve_max_tokens: int = 40_000,
     ) -> None:
         self._llm = llm
         self._token_limit = token_limit
         self._threshold = threshold
         self._preserve_ratio = preserve_ratio
+        self._preserve_min_tokens = preserve_min_tokens
+        self._preserve_max_tokens = preserve_max_tokens
 
     def should_compress(self, last_input_tokens: int) -> bool:
         """兼容旧调用方的比例阈值判断。"""
@@ -49,7 +55,7 @@ class ContextCompressor:
             return False
         return last_input_tokens >= self._token_limit * self._threshold
 
-    def compress(self, messages: list[BaseMessage]) -> CompressResult | None:
+    def compress(self, messages: list[BaseMessage], *, reason: str = "auto") -> CompressResult | None:
         """执行压缩。"""
         if len(messages) < 4:
             return None
@@ -58,7 +64,12 @@ class ContextCompressor:
         if split_idx <= 0:
             return None
 
-        old_messages = messages[:split_idx]
+        working_start = find_compaction_working_start(messages)
+        if split_idx <= working_start:
+            return None
+
+        preserved_prefix = messages[:working_start]
+        old_messages = messages[working_start:split_idx]
         logger.info(
             "Compressing %d/%d messages (split at index %d)",
             len(old_messages), len(messages), split_idx,
@@ -70,15 +81,34 @@ class ContextCompressor:
             return None
 
         remove_ids = [msg.id for msg in old_messages if msg.id]
+        pre_tokens = estimate_message_tokens(old_messages)
         summary_msg = self.build_summary_message(summary_text)
+        boundary_msg = self.build_compact_boundary_message(
+            pre_tokens=pre_tokens,
+            post_tokens=0,
+            reason=reason,
+        )
+        compressed_messages = [*preserved_prefix, boundary_msg, summary_msg, *messages[split_idx:]]
+        post_tokens = estimate_message_tokens(compressed_messages)
+        boundary_msg = self.build_compact_boundary_message(
+            pre_tokens=pre_tokens,
+            post_tokens=post_tokens,
+            reason=reason,
+        )
+        compressed_messages = [*preserved_prefix, boundary_msg, summary_msg, *messages[split_idx:]]
 
         return CompressResult(
             remove_message_ids=remove_ids,
+            boundary_message=boundary_msg,
             summary_message=summary_msg,
             summary_text=summary_text,
-            compressed_messages=[summary_msg, *messages[split_idx:]],
+            compressed_messages=compressed_messages,
             removed_count=len(old_messages),
-            kept_count=len(messages) - split_idx,
+            kept_count=len(messages) - split_idx + len(preserved_prefix),
+            split_index=split_idx,
+            pre_tokens=pre_tokens,
+            post_tokens=post_tokens,
+            reason=reason,
         )
 
     @staticmethod
@@ -92,19 +122,27 @@ class ContextCompressor:
             ),
         )
 
+    @staticmethod
+    def build_compact_boundary_message(
+        *,
+        pre_tokens: int,
+        post_tokens: int,
+        reason: str,
+    ) -> HumanMessage:
+        return HumanMessage(
+            content=(
+                f'<compact_boundary pre_tokens="{pre_tokens}" '
+                f'post_tokens="{post_tokens}" reason="{reason}" />'
+            ),
+        )
+
     def _find_split_point(self, messages: list[BaseMessage]) -> int:
-        total = len(messages)
-        keep_count = max(int(total * self._preserve_ratio), 2)
-        candidate = total - keep_count
-
-        for i in range(candidate, 0, -1):
-            msg = messages[i]
-            if isinstance(msg, HumanMessage):
-                return i
-            if isinstance(msg, AIMessage) and not msg.tool_calls:
-                return i + 1 if i + 1 <= candidate else i
-
-        return min(2, candidate) if candidate > 0 else 0
+        split_idx = find_safe_split_index(
+            messages,
+            min_keep_tokens=self._preserve_min_tokens,
+            max_keep_tokens=self._preserve_max_tokens,
+        )
+        return split_idx or 0
 
     def _generate_summary(self, old_messages: list[BaseMessage]) -> str:
         conversation_text = self._serialize_messages(old_messages)
@@ -177,28 +215,43 @@ class CompressResult:
 
     __slots__ = (
         "remove_message_ids",
+        "boundary_message",
         "summary_message",
         "summary_text",
         "compressed_messages",
         "removed_count",
         "kept_count",
+        "split_index",
+        "pre_tokens",
+        "post_tokens",
+        "reason",
     )
 
     def __init__(
         self,
         remove_message_ids: list[str],
+        boundary_message: HumanMessage,
         summary_message: HumanMessage,
         summary_text: str,
         compressed_messages: list[BaseMessage],
         removed_count: int,
         kept_count: int,
+        split_index: int,
+        pre_tokens: int,
+        post_tokens: int,
+        reason: str,
     ) -> None:
         self.remove_message_ids = remove_message_ids
+        self.boundary_message = boundary_message
         self.summary_message = summary_message
         self.summary_text = summary_text
         self.compressed_messages = compressed_messages
         self.removed_count = removed_count
         self.kept_count = kept_count
+        self.split_index = split_index
+        self.pre_tokens = pre_tokens
+        self.post_tokens = post_tokens
+        self.reason = reason
 
 
 def _truncate(text: str | list, max_len: int = 500) -> str:

@@ -72,6 +72,7 @@ class StreamHandler:
         event_bus.subscribe(EventType.TOOL_LIVE_OUTPUT, self.on_tool_live_output)
         event_bus.subscribe(EventType.TOOL_RESULT_PERSISTED, self.on_tool_result_persisted)
         event_bus.subscribe(EventType.CONTEXT_COMPRESSED, self.on_context_compressed)
+        event_bus.subscribe(EventType.COMPACT_BOUNDARY, self.on_compact_boundary)
         event_bus.subscribe(EventType.APPROVAL_REQUEST, self.on_approval_request)
         event_bus.subscribe(EventType.APPROVAL_RESPONSE, self.on_approval_response)
         event_bus.subscribe(EventType.ERROR, self.on_error)
@@ -366,6 +367,14 @@ class StreamHandler:
             f"\n  [bold yellow]⚡ 上下文已压缩[/bold yellow] "
             f"[dim]({removed} 条消息摘要化, 保留 {kept} 条)[/dim]"
         )
+
+    def on_compact_boundary(self, event: AgentEvent) -> None:
+        self._session.record({
+            "type": "compact_boundary",
+            "reason": event.data.get("reason", "auto"),
+            "pre_tokens": event.data.get("pre_tokens", 0),
+            "post_tokens": event.data.get("post_tokens", 0),
+        })
 
     def on_error(self, event: AgentEvent) -> None:
         self.end_stream()

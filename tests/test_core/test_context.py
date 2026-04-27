@@ -597,6 +597,19 @@ class TestSessionListAndLoad:
         assert messages[1].content == "E"
         assert messages[2].content == "F"
 
+    def test_build_resume_messages_restores_compact_boundary(self, recorder):
+        recorder.record({"type": "compact_boundary", "reason": "auto", "pre_tokens": 100, "post_tokens": 20})
+        recorder.record({"type": "compression", "summary": "S1"})
+        recorder.record({"type": "transcript_message", "role": "user", "content": "C"})
+        filepath = recorder.flush()
+
+        messages = recorder.build_resume_messages(filepath)
+
+        assert len(messages) == 3
+        assert messages[0].content.startswith("<compact_boundary ")
+        assert "conversation_history_summary" in messages[1].content
+        assert messages[2].content == "C"
+
     def test_build_resume_messages_prefers_canonical_transcript(self, recorder):
         """若存在 canonical transcript，应恢复 assistant tool_calls 和 ToolMessage。"""
         recorder.record({

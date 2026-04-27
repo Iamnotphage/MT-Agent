@@ -292,13 +292,27 @@ def _stream_with_events(
                             # 只保留最后 2 条消息
                             keep_count = min(2, len(history))
                             from core.context.compressor import CompressResult
+                            boundary_msg = compressor.build_compact_boundary_message(
+                                pre_tokens=actual_tokens or 0,
+                                post_tokens=0,
+                                reason="reactive_retry",
+                            )
                             aggressive_result = CompressResult(
                                 remove_message_ids=[msg.id for msg in history[:-keep_count] if msg.id],
+                                boundary_message=boundary_msg,
                                 summary_message=compressor.build_summary_message("Previous conversation context has been compressed due to length limits."),
                                 summary_text="Previous conversation context has been compressed due to length limits.",
-                                compressed_messages=[compressor.build_summary_message("Previous conversation context has been compressed due to length limits."), *history[-keep_count:]],
+                                compressed_messages=[
+                                    boundary_msg,
+                                    compressor.build_summary_message("Previous conversation context has been compressed due to length limits."),
+                                    *history[-keep_count:],
+                                ],
                                 removed_count=len(history) - keep_count,
                                 kept_count=keep_count,
+                                split_index=len(history) - keep_count,
+                                pre_tokens=actual_tokens or 0,
+                                post_tokens=0,
+                                reason="reactive_retry",
                             )
 
                         logger.info("Forced compression: removed=%d kept=%d", aggressive_result.removed_count, aggressive_result.kept_count)
@@ -311,9 +325,18 @@ def _stream_with_events(
                                 "removed_count": aggressive_result.removed_count,
                                 "kept_count": aggressive_result.kept_count,
                                 "trigger_reason": "reactive_retry",
-                                "pre_tokens": actual_tokens or 0,
-                                "post_tokens": estimate_tokens(str(aggressive_result.summary_message.content)),
+                                "pre_tokens": aggressive_result.pre_tokens,
+                                "post_tokens": aggressive_result.post_tokens,
                             },
+                        ))
+                        event_bus.emit(AgentEvent(
+                            type=EventType.COMPACT_BOUNDARY,
+                            data={
+                                "reason": aggressive_result.reason,
+                                "pre_tokens": aggressive_result.pre_tokens,
+                                "post_tokens": aggressive_result.post_tokens,
+                            },
+                            turn=turn,
                         ))
 
                         # 重建 messages（保留 system prompt，替换历史为压缩后的）
@@ -607,7 +630,7 @@ def _maybe_auto_compact(
     pre_tokens = session_stats.last_input_tokens
 
     try:
-        result = compressor.compress(history)
+        result = compressor.compress(history, reason=str(decision.trigger_reason or "auto"))
     except Exception as exc:
         session_stats.compression_failure_count += 1
         event_bus.emit(AgentEvent(
@@ -646,8 +669,17 @@ def _maybe_auto_compact(
             "removed_count": result.removed_count,
             "kept_count": result.kept_count,
             "trigger_reason": decision.trigger_reason,
-            "pre_tokens": pre_tokens,
-            "post_tokens": post_tokens,
+            "pre_tokens": result.pre_tokens,
+            "post_tokens": result.post_tokens,
+        },
+        turn=turn,
+    ))
+    event_bus.emit(AgentEvent(
+        type=EventType.COMPACT_BOUNDARY,
+        data={
+            "reason": result.reason,
+            "pre_tokens": result.pre_tokens,
+            "post_tokens": result.post_tokens,
         },
         turn=turn,
     ))
@@ -663,5 +695,6 @@ def _maybe_auto_compact(
 def _build_compression_message_ops(result: CompressResult) -> list:
     """构造 LangGraph message 更新操作。"""
     message_ops: list = [RemoveMessage(id=msg_id) for msg_id in result.remove_message_ids]
+    message_ops.append(result.boundary_message)
     message_ops.append(result.summary_message)
     return message_ops
