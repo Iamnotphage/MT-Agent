@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
 from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.event_bus import EventType
@@ -404,6 +404,53 @@ class TestReasoningNode:
         assert isinstance(second_assistant, AIMessage)
         assert first_assistant.additional_kwargs["reasoning_content"] == "tool turn thinking"
         assert second_assistant.additional_kwargs["reasoning_content"] == "final tool-turn reasoning"
+
+    def test_reasoning_fallback_restores_missing_tool_turn_reasoning(self, event_bus, mock_llm_text):
+        node = create_reasoning_node(mock_llm_text, event_bus)
+        history = [
+            HumanMessage(content="question 1"),
+            AIMessage(
+                content="let me inspect files",
+                tool_calls=[{"name": "glob", "args": {}, "id": "call_1", "type": "tool_call"}],
+            ),
+            ToolMessage(content="result", tool_call_id="call_1", name="glob"),
+            HumanMessage(content="question 2"),
+        ]
+        state = {
+            "messages": history,
+            "assistant_reasoning_fallbacks": [{
+                "tool_call_ids": ["call_1"],
+                "reasoning_content": "fallback thinking",
+            }],
+            "turn_count": 1,
+        }
+
+        node(state)
+
+        streamed_messages = mock_llm_text.stream.call_args.args[0]
+        first_assistant = streamed_messages[-3]
+        assert isinstance(first_assistant, AIMessage)
+        assert first_assistant.additional_kwargs["reasoning_content"] == "fallback thinking"
+
+    def test_compacted_history_preserves_reasoning_content(self, event_bus, mock_llm_text):
+        node = create_reasoning_node(mock_llm_text, event_bus)
+        history = [
+            HumanMessage(content='<compact_boundary pre_tokens="100" post_tokens="20" reason="threshold_exceeded" />'),
+            HumanMessage(content="<conversation_history_summary>\nsummary\n</conversation_history_summary>"),
+            AIMessage(
+                content="20 files read",
+                additional_kwargs={"reasoning_content": "tool-backed turn reasoning"},
+            ),
+            HumanMessage(content="继续读30个文件"),
+        ]
+        state = {"messages": history, "turn_count": 1}
+
+        node(state)
+
+        streamed_messages = mock_llm_text.stream.call_args.args[0]
+        compacted_assistant = streamed_messages[-2]
+        assert isinstance(compacted_assistant, AIMessage)
+        assert compacted_assistant.additional_kwargs["reasoning_content"] == "tool-backed turn reasoning"
 
 
 class TestShouldUseTools:

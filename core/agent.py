@@ -73,9 +73,16 @@ def create_agent_runtime(
         save_memory_fn=memory_manager.save_memory,
     )
 
+    # 为压缩器创建独立的 LLM 实例（不带 thinking mode）
+    compressor_llm = create_chat_model(
+        llm_cfg,
+        streaming=False,
+        temperature=0.0,
+    )
+
     # 上下文压缩器
     compressor = ContextCompressor(
-        llm=llm,
+        llm=compressor_llm,
         token_limit=CONTEXT_CONFIG.get("token_limit", 65536),
         threshold=CONTEXT_CONFIG.get("compression_threshold", 0.50),
         preserve_ratio=CONTEXT_CONFIG.get("compression_preserve_ratio", 0.30),

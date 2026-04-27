@@ -8,7 +8,7 @@ from core.event_bus import EventBus
 from core.state import AgentState
 from core.nodes.reasoning import create_reasoning_node, should_use_tools
 from core.nodes.tool_routing import create_tool_routing_node, needs_approval
-from core.nodes.human_approval import create_human_approval_node
+from core.nodes.human_approval import create_human_approval_node, post_approval_route
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -85,8 +85,15 @@ def build_agent_graph(
         }
     )
 
-    # human_approval -> tools
-    graph.add_edge("human_approval", "tools")
+    # human_approval -> 条件路由
+    graph.add_conditional_edges(
+        "human_approval",
+        post_approval_route,
+        {
+            "tools": "tools",
+            "reasoning": "reasoning",
+        }
+    )
 
     # tools -> reasoning (ToolNode 直接输出 ToolMessage，不需要 observation)
     graph.add_edge("tools", "reasoning")

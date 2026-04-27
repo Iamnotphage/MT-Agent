@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage
 from langgraph.types import interrupt
 
 from core.event_bus import AgentEvent, EventBus, EventType
@@ -53,8 +53,6 @@ def create_human_approval_node(
         # ── 根据决策更新 pending_tool_calls 状态 ──
         pending = state.get("pending_tool_calls", [])
         updated_calls: list[ToolCallInfo] = []
-        rejection_messages: list[ToolMessage] = []
-
         for tc in pending:
             if tc["status"] != "awaiting_approval":
                 updated_calls.append(tc)
@@ -65,12 +63,6 @@ def create_human_approval_node(
                 updated_calls.append({**tc, "status": "pending"})
             else:
                 updated_calls.append({**tc, "status": "cancelled"})
-                # 为被拒绝的 tool_call 生成 ToolMessage，防止 ToolNode 执行它们
-                rejection_messages.append(ToolMessage(
-                    content="[用户拒绝执行此工具]",
-                    tool_call_id=tc["call_id"],
-                    name=tc["tool_name"],
-                ))
 
         # ── 发送 APPROVAL_RESPONSE 事件 ──
         event_bus.emit(AgentEvent(
@@ -85,17 +77,35 @@ def create_human_approval_node(
             sum(1 for v in decisions.values() if not v),
         )
 
+        approved_call_ids = {
+            tc["call_id"]
+            for tc in updated_calls
+            if tc.get("status") == "pending"
+        }
+
         result: dict[str, Any] = {
             "pending_tool_calls": updated_calls,
             "needs_human_approval": False,
             "approval_requests": [],
         }
-        if rejection_messages:
-            result["messages"] = rejection_messages
-
+        messages_update = _rewrite_latest_tool_call_message(
+            list(state.get("messages", [])),
+            decisions=decisions,
+            approved_call_ids=approved_call_ids,
+        )
+        if messages_update is not None:
+            result["messages"] = [messages_update]
         return result
 
     return human_approval_node
+
+
+def post_approval_route(state: AgentState) -> str:
+    """审批后决定后续路径：有已批准工具则进 tools，否则回 reasoning。"""
+    pending = state.get("pending_tool_calls", [])
+    if any(tc.get("status") == "pending" for tc in pending):
+        return "tools"
+    return "reasoning"
 
 
 def _parse_response(
@@ -113,3 +123,45 @@ def _parse_response(
 
     # 兜底: 视为全部拒绝
     return {req["call_id"]: False for req in approval_requests}
+
+
+def _rewrite_latest_tool_call_message(
+    messages: list[BaseMessage],
+    *,
+    decisions: dict[str, bool],
+    approved_call_ids: set[str],
+) -> AIMessage | None:
+    """按审批结果重写最近一条 assistant tool_calls 消息。"""
+    if not decisions:
+        return None
+
+    decision_ids = set(decisions)
+    for message in reversed(messages):
+        if not isinstance(message, AIMessage) or not message.tool_calls:
+            continue
+
+        tool_call_ids = {
+            str(tc.get("id"))
+            for tc in message.tool_calls
+            if tc.get("id")
+        }
+        if not (tool_call_ids & decision_ids):
+            continue
+
+        filtered_tool_calls = [
+            tc for tc in message.tool_calls
+            if tc.get("id") in approved_call_ids
+        ]
+        content = message.content
+        if not filtered_tool_calls and not content:
+            content = "[用户拒绝了工具调用]"
+
+        return AIMessage(
+            content=content,
+            tool_calls=filtered_tool_calls,
+            additional_kwargs=dict(message.additional_kwargs or {}),
+            id=message.id,
+            response_metadata=getattr(message, "response_metadata", None) or {},
+        )
+
+    return None

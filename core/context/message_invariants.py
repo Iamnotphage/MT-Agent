@@ -14,6 +14,10 @@ def is_compact_boundary_message(message: BaseMessage) -> bool:
     return isinstance(message, HumanMessage) and str(message.content or "").startswith(COMPACT_BOUNDARY_PREFIX)
 
 
+def is_compact_summary_message(message: BaseMessage) -> bool:
+    return isinstance(message, HumanMessage) and str(message.content or "").startswith(SUMMARY_PREFIX)
+
+
 def find_last_compact_boundary(messages: list[BaseMessage]) -> int | None:
     for idx in range(len(messages) - 1, -1, -1):
         if is_compact_boundary_message(messages[idx]):

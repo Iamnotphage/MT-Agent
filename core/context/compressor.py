@@ -21,7 +21,12 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from core.context.budget import estimate_message_tokens
-from core.context.message_invariants import find_compaction_working_start, find_safe_split_index
+from core.context.message_invariants import (
+    find_compaction_working_start,
+    find_safe_split_index,
+    is_compact_boundary_message,
+    is_compact_summary_message,
+)
 from prompts.compression_prompt import COMPACT_SYSTEM_PROMPT
 
 if TYPE_CHECKING:
@@ -71,6 +76,11 @@ class ContextCompressor:
 
         preserved_prefix = messages[:working_start]
         old_messages = messages[working_start:split_idx]
+        kept_messages = messages[split_idx:]
+
+        # 清理保留消息中的 reasoning_content：只保留涉及工具调用的 segment 中的 reasoning_content
+        kept_messages = _clean_reasoning_content(kept_messages)
+
         logger.info(
             "Compressing %d/%d messages (split at index %d)",
             len(old_messages), len(messages), split_idx,
@@ -89,14 +99,14 @@ class ContextCompressor:
             post_tokens=0,
             reason=reason,
         )
-        compressed_messages = [*preserved_prefix, boundary_msg, summary_msg, *messages[split_idx:]]
+        compressed_messages = [*preserved_prefix, boundary_msg, summary_msg, *kept_messages]
         post_tokens = estimate_message_tokens(compressed_messages)
         boundary_msg = self.build_compact_boundary_message(
             pre_tokens=pre_tokens,
             post_tokens=post_tokens,
             reason=reason,
         )
-        compressed_messages = [*preserved_prefix, boundary_msg, summary_msg, *messages[split_idx:]]
+        compressed_messages = [*preserved_prefix, boundary_msg, summary_msg, *kept_messages]
 
         return CompressResult(
             remove_message_ids=remove_ids,
@@ -272,3 +282,57 @@ def _extract_compact_summary(text: str) -> str:
     if match:
         return match.group(1).strip()
     return text.strip()
+
+
+def _clean_reasoning_content(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """只保留涉及工具调用的 segment 中的 reasoning_content。"""
+    if not messages:
+        return []
+
+    # 划分 segment（两个 HumanMessage 之间）
+    human_indices = [idx for idx, msg in enumerate(messages) if isinstance(msg, HumanMessage)]
+    segments: list[tuple[int, int]] = []
+    if not human_indices:
+        segments.append((0, len(messages)))
+    else:
+        for pos, start_idx in enumerate(human_indices):
+            end_idx = human_indices[pos + 1] if pos + 1 < len(human_indices) else len(messages)
+            segments.append((start_idx, end_idx))
+
+    # 判断每个 segment 是否有工具调用
+    preserve_segments: set[int] = set()
+    for seg_idx, (start, end) in enumerate(segments):
+        segment = messages[start:end]
+        has_tool_calls = any(
+            (isinstance(msg, AIMessage) and msg.tool_calls) or isinstance(msg, ToolMessage)
+            for msg in segment
+        )
+        has_compaction_marker = any(
+            is_compact_boundary_message(msg) or is_compact_summary_message(msg)
+            for msg in segment
+        )
+        if has_tool_calls or has_compaction_marker:
+            preserve_segments.add(seg_idx)
+
+    # 清理 reasoning_content
+    cleaned: list[BaseMessage] = []
+    for idx, msg in enumerate(messages):
+        if isinstance(msg, AIMessage):
+            seg_idx = next((i for i, (s, e) in enumerate(segments) if s <= idx < e), 0)
+            reasoning_content = (msg.additional_kwargs or {}).get("reasoning_content")
+
+            if reasoning_content and seg_idx not in preserve_segments:
+                additional_kwargs = dict(msg.additional_kwargs or {})
+                additional_kwargs.pop("reasoning_content", None)
+                cleaned.append(AIMessage(
+                    content=msg.content,
+                    tool_calls=msg.tool_calls or [],
+                    additional_kwargs=additional_kwargs,
+                    id=msg.id,
+                    response_metadata=getattr(msg, "response_metadata", None) or {},
+                ))
+            else:
+                cleaned.append(msg)
+        else:
+            cleaned.append(msg)
+    return cleaned

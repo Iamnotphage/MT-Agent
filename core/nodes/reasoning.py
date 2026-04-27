@@ -20,6 +20,10 @@ from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.context.auto_compact import AutoCompactDecision, AutoCompactPolicy, QuerySource
 from core.context.budget import budget_snapshot
 from core.event_bus import AgentEvent, EventBus, EventType
+from core.context.message_invariants import (
+    is_compact_boundary_message,
+    is_compact_summary_message,
+)
 from core.state import AgentState, ToolCallInfo
 from core.utils.tokens import estimate_tokens
 from prompts.system_prompt import build_system_prompt
@@ -85,52 +89,50 @@ def create_reasoning_node(
                 from langchain_core.messages import HumanMessage
                 messages.append(HumanMessage(content=session_ctx))
 
-        history = _prepare_history_for_model(list(state.get("messages", [])))
-        messages.extend(history)
+        # 3) 准备历史消息并估算 token
+        prepared_history = _prepare_history_for_model(
+            list(state.get("messages", [])),
+            list(state.get("assistant_reasoning_fallbacks", [])),
+        )
+        messages.extend(prepared_history)
 
-        # 3) 估算当前 messages 的 token 数并更新统计，让压缩检查基于当前轮
         if session_stats is not None:
             total = _update_context_budget_stats(messages, session_stats)
-            logger.debug("Estimated input tokens: %d", total)
+            logger.info("Estimated input tokens: %d (threshold: %d)", total, session_stats.last_auto_compact_threshold)
 
-        # 4) 压缩检查 — 基于刚估算的 token 数决定是否压缩
+        # 4) 压缩检查
         compress_result = None
-        decision: AutoCompactDecision | None = None
         if compressor is not None and session_stats is not None:
             decision = _build_auto_compact_decision(
                 auto_compact_policy=auto_compact_policy,
                 session_stats=session_stats,
                 query_source=query_source,
             )
-            _emit_auto_compact_checked(
-                event_bus,
-                decision,
-                turn,
-                auto_compact_policy.max_consecutive_failures,
-            )
+            _emit_auto_compact_checked(event_bus, decision, turn, auto_compact_policy.max_consecutive_failures)
+
             compress_result = _maybe_auto_compact(
-                compressor=compressor,
-                event_bus=event_bus,
-                session_stats=session_stats,
-                state=state,
-                decision=decision,
-                turn=turn,
-                query_source=query_source,
+                compressor, event_bus, session_stats, state, decision, turn, query_source
             )
-            # 如果压缩了，重新构建 messages
+
             if compress_result is not None:
+                # 重建 messages：system + session_context + 压缩后的历史
                 messages = [system_msg]
                 if turn == 0 and context_manager is not None:
                     session_ctx = context_manager.build_session_context()
                     if session_ctx:
-                        from langchain_core.messages import HumanMessage
                         messages.append(HumanMessage(content=session_ctx))
-                messages.extend(compress_result.compressed_messages)
-                # 重新估算压缩后的 token 数
-                total = _update_context_budget_stats(messages, session_stats)
-                logger.debug("Estimated tokens after compression: %d", total)
 
-        # 5) 流式调用 LLM, 逐 chunk 发送 EventBus 事件
+                prepared_compressed = _prepare_history_for_model(
+                    compress_result.compressed_messages,
+                    list(state.get("assistant_reasoning_fallbacks", [])),
+                )
+                messages.extend(prepared_compressed)
+
+                if session_stats is not None:
+                    total = _update_context_budget_stats(messages, session_stats)
+                    logger.info("Tokens after compression: %d", total)
+
+        # 5) 流式调用 LLM
         collected = _stream_with_events(
             bound_llm, messages, event_bus, turn,
             compressor=compressor,
@@ -139,25 +141,17 @@ def create_reasoning_node(
             auto_compact_policy=auto_compact_policy,
         )
 
-        # 6) 收集 token usage → SessionStats
+        # 6) 收集 token usage
         if session_stats is not None:
             _record_token_usage(collected, session_stats)
-            _update_context_budget_stats_from_count(
-                session_stats.last_input_tokens,
-                session_stats,
-            )
+            _update_context_budget_stats_from_count(session_stats.last_input_tokens, session_stats)
 
-        # 7) 构造 AIMessage 写入 state.messages 历史
+        # 7) 构造 AIMessage
         reasoning_content = _extract_reasoning_content(collected)
-        additional_kwargs = (
-            {"reasoning_content": reasoning_content}
-            if reasoning_content
-            else {}
-        )
         ai_message = AIMessage(
             content=collected.content or "",
             tool_calls=collected.tool_calls or [],
-            additional_kwargs=additional_kwargs,
+            additional_kwargs={"reasoning_content": reasoning_content} if reasoning_content else {},
         )
         event_bus.emit(AgentEvent(
             type=EventType.TRANSCRIPT_MESSAGE,
@@ -170,24 +164,17 @@ def create_reasoning_node(
             turn=turn,
         ))
 
-        # 8) tool_calls → pending_tool_calls (供 tool_routing 审批)
+        # 8) 提取 tool_calls
         pending = _extract_tool_calls(collected, event_bus, turn)
 
         # 9) TURN_START 事件
         event_bus.emit(AgentEvent(
             type=EventType.TURN_START,
-            data={
-                "turn": turn + 1,
-                "has_tool_calls": bool(pending),
-                "tool_count": len(pending),
-            },
+            data={"turn": turn + 1, "has_tool_calls": bool(pending), "tool_count": len(pending)},
             turn=turn + 1,
         ))
 
-        logger.info(
-            "reasoning turn=%d content_len=%d tool_calls=%d",
-            turn + 1, len(ai_message.content), len(pending),
-        )
+        logger.info("reasoning turn=%d content_len=%d tool_calls=%d", turn + 1, len(ai_message.content), len(pending))
 
         result = {
             "messages": [ai_message],
@@ -195,7 +182,16 @@ def create_reasoning_node(
             "pending_tool_calls": pending,
         }
 
-        # 合并压缩操作 — RemoveMessage + summary_message 需要和 ai_message 一起写入 state
+        # 保存 reasoning_content fallback
+        if pending and reasoning_content:
+            existing_fallbacks = list(state.get("assistant_reasoning_fallbacks", []))
+            tool_call_ids = [tc["id"] for tc in ai_message.tool_calls or [] if tc.get("id")]
+            if tool_call_ids:
+                existing_fallbacks = [e for e in existing_fallbacks if e.get("tool_call_ids") != tool_call_ids]
+                existing_fallbacks.append({"tool_call_ids": tool_call_ids, "reasoning_content": reasoning_content})
+                result["assistant_reasoning_fallbacks"] = existing_fallbacks
+
+        # 合并压缩操作
         if compress_result is not None:
             result["messages"] = _build_compression_message_ops(compress_result) + result["messages"]
 
@@ -385,12 +381,23 @@ def _stream_with_events(
     return collected
 
 
-def _prepare_history_for_model(messages: list[BaseMessage]) -> list[BaseMessage]:
-    """Keep reasoning_content for any completed turn segment that involved tool use."""
+def _prepare_history_for_model(
+    messages: list[BaseMessage],
+    reasoning_fallbacks: list[dict[str, Any]] | None = None,
+) -> list[BaseMessage]:
+    """Keep reasoning_content only for assistant messages between two user messages that involve tool calls."""
     if not messages:
         return []
 
-    human_indices = [idx for idx, message in enumerate(messages) if isinstance(message, HumanMessage)]
+    fallback_by_tool_ids: dict[tuple[str, ...], str] = {}
+    for entry in reasoning_fallbacks or []:
+        tool_call_ids = tuple(str(item) for item in entry.get("tool_call_ids") or [])
+        reasoning_content = entry.get("reasoning_content")
+        if tool_call_ids and isinstance(reasoning_content, str) and reasoning_content:
+            fallback_by_tool_ids[tool_call_ids] = reasoning_content
+
+    # 找到所有 HumanMessage 的索引，划分 segment
+    human_indices = [idx for idx, msg in enumerate(messages) if isinstance(msg, HumanMessage)]
     segments: list[tuple[int, int]] = []
     if not human_indices:
         segments.append((0, len(messages)))
@@ -399,34 +406,63 @@ def _prepare_history_for_model(messages: list[BaseMessage]) -> list[BaseMessage]
             end_idx = human_indices[pos + 1] if pos + 1 < len(human_indices) else len(messages)
             segments.append((start_idx, end_idx))
 
-    preserve_reasoning_indices: set[int] = set()
-    for start_idx, end_idx in segments:
+    # 判断每个 segment 是否有工具调用
+    preserve_reasoning_segments: set[int] = set()
+    for seg_idx, (start_idx, end_idx) in enumerate(segments):
         segment = messages[start_idx:end_idx]
-        has_tool_activity = any(
-            isinstance(message, ToolMessage)
-            or (isinstance(message, AIMessage) and bool(message.tool_calls))
-            for message in segment
+        has_tool_calls = any(
+            (isinstance(msg, AIMessage) and bool(msg.tool_calls))
+            or isinstance(msg, ToolMessage)
+            for msg in segment
         )
-        if has_tool_activity:
-            for idx in range(start_idx, end_idx):
-                if isinstance(messages[idx], AIMessage):
-                    preserve_reasoning_indices.add(idx)
+        has_compaction_marker = any(
+            is_compact_boundary_message(msg) or is_compact_summary_message(msg)
+            for msg in segment
+        )
+        if has_tool_calls or has_compaction_marker:
+            preserve_reasoning_segments.add(seg_idx)
 
     prepared: list[BaseMessage] = []
     for idx, message in enumerate(messages):
         if isinstance(message, AIMessage):
+            # 找到这个消息属于哪个 segment
+            seg_idx = 0
+            for i, (start, end) in enumerate(segments):
+                if start <= idx < end:
+                    seg_idx = i
+                    break
+
+            should_preserve = seg_idx in preserve_reasoning_segments
             reasoning_content = (message.additional_kwargs or {}).get("reasoning_content")
-            if reasoning_content and idx not in preserve_reasoning_indices:
+
+            # 从 fallback 恢复
+            if not reasoning_content and message.tool_calls:
+                tool_call_ids = tuple(str(tc.get("id")) for tc in message.tool_calls if tc.get("id"))
+                fallback_reasoning = fallback_by_tool_ids.get(tool_call_ids)
+                if fallback_reasoning:
+                    additional_kwargs = dict(message.additional_kwargs or {})
+                    additional_kwargs["reasoning_content"] = fallback_reasoning
+                    message = AIMessage(
+                        content=message.content,
+                        tool_calls=message.tool_calls or [],
+                        additional_kwargs=additional_kwargs,
+                        id=message.id,
+                        response_metadata=getattr(message, "response_metadata", None) or {},
+                    )
+                    reasoning_content = fallback_reasoning
+
+            # 移除不需要保留的 reasoning_content
+            if reasoning_content and not should_preserve:
                 additional_kwargs = dict(message.additional_kwargs or {})
                 additional_kwargs.pop("reasoning_content", None)
-                prepared.append(AIMessage(
+                message = AIMessage(
                     content=message.content,
                     tool_calls=message.tool_calls or [],
                     additional_kwargs=additional_kwargs,
                     id=message.id,
                     response_metadata=getattr(message, "response_metadata", None) or {},
-                ))
-                continue
+                )
+
         prepared.append(message)
     return prepared
 

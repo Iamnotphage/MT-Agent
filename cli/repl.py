@@ -343,11 +343,12 @@ class Repl:
         stats = self.runtime.session.stats
         model = stats.model or "unknown"
         last = stats.last_input_tokens
+        effective_limit = stats.last_effective_context_limit or self._token_limit
 
-        if last <= 0:
+        if last <= 0 or effective_limit <= 0:
             remaining_pct = 100
         else:
-            remaining_pct = max(int((1 - last / self._token_limit) * 100), 0)
+            remaining_pct = max(int((1 - last / effective_limit) * 100), 0)
 
         # 获取工作目录完整路径，如果在 home 目录下则用 ~ 替换
         working_dir = str(self._working_dir)
