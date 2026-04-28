@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -37,6 +38,7 @@ DEFAULT_DATASET = "princeton-nlp/SWE-bench_Lite"
 DEFAULT_SPLIT = "test"
 DEFAULT_REPOS_ROOT = ".swebench/repos"
 DEFAULT_OUTPUT = "predictions/mt-agent.jsonl"
+DEFAULT_GIT_RETRIES = 3
 
 
 def log(message: str) -> None:
@@ -107,23 +109,61 @@ def run_git(cmd: list[str], cwd: Path) -> str:
     return result.stdout.strip()
 
 
+def has_commit(repo_dir: Path, commit: str) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{commit}^{{commit}}"],
+        cwd=repo_dir,
+        text=True,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def run_git_with_retry(cmd: list[str], cwd: Path | None = None, retries: int = DEFAULT_GIT_RETRIES) -> None:
+    last_error: subprocess.CalledProcessError | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            subprocess.run(cmd, cwd=cwd, check=True)
+            return
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            if attempt >= retries:
+                break
+            wait_seconds = attempt * 2
+            log(f"[git] attempt {attempt}/{retries} failed: {' '.join(cmd)}")
+            log(f"[git] retrying in {wait_seconds}s")
+            time.sleep(wait_seconds)
+    assert last_error is not None
+    raise last_error
+
+
 def ensure_repo(instance: dict, repos_root: Path, repo_source: str) -> Path:
     repo_key = instance["repo"].replace("/", "__")
     repo_dir = repos_root / repo_key
     repo_url = f"{repo_source}/{repo_key}.git"
+    base_commit = instance["base_commit"]
 
     repos_root.mkdir(parents=True, exist_ok=True)
     if not repo_dir.exists():
         log(f"[repo] cloning {repo_url} -> {repo_dir}")
-        subprocess.run(["git", "clone", repo_url, str(repo_dir)], check=True)
+        run_git_with_retry(["git", "clone", repo_url, str(repo_dir)])
     else:
-        log(f"[repo] refreshing {repo_dir}")
-        subprocess.run(["git", "fetch", "--all", "--tags"], cwd=repo_dir, check=True)
+        if has_commit(repo_dir, base_commit):
+            log(f"[repo] found base commit locally, skip fetch: {base_commit}")
+        else:
+            log(f"[repo] refreshing {repo_dir}")
+            run_git_with_retry(["git", "fetch", "--all", "--tags"], cwd=repo_dir)
 
-    log(f"[repo] resetting {repo_dir.name} to {instance['base_commit']}")
-    subprocess.run(["git", "reset", "--hard", instance["base_commit"]], cwd=repo_dir, check=True)
+    if not has_commit(repo_dir, base_commit):
+        raise RuntimeError(
+            f"Base commit {base_commit} is still unavailable in {repo_dir}. "
+            "Check network access or repo mirror health."
+        )
+
+    log(f"[repo] resetting {repo_dir.name} to {base_commit}")
+    subprocess.run(["git", "reset", "--hard", base_commit], cwd=repo_dir, check=True)
     subprocess.run(["git", "clean", "-fdx"], cwd=repo_dir, check=True)
-    log(f"[repo] ready at {instance['base_commit']}")
+    log(f"[repo] ready at {base_commit}")
     return repo_dir
 
 
