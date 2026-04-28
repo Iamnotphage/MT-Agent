@@ -189,7 +189,7 @@ def auto_resume_interrupts(runtime, config: dict) -> None:
             for intr in getattr(task, "interrupts", []):
                 value = intr.value
                 if isinstance(value, list):
-                    for item in value:v
+                    for item in value:
                         call_id = item.get("call_id")
                         if call_id:
                             decisions[call_id] = True
