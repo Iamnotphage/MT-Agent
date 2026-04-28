@@ -19,6 +19,7 @@ from rich.console import Console
 
 from cli.utils.text import TOOL_DISPLAY, truncate
 from core.event_bus import AgentEvent, EventBus, EventType
+from core.session.schema import make_session_memory_update_record
 
 if TYPE_CHECKING:
     from core.session import SessionRecorder
@@ -77,6 +78,7 @@ class StreamHandler:
         event_bus.subscribe(EventType.APPROVAL_RESPONSE, self.on_approval_response)
         event_bus.subscribe(EventType.ERROR, self.on_error)
         event_bus.subscribe(EventType.TRANSCRIPT_MESSAGE, self.on_transcript_message)
+        event_bus.subscribe(EventType.SESSION_MEMORY_UPDATED, self.on_session_memory_updated)
 
     # ── 流式控制 ─────────────────────────────────────────────────
 
@@ -362,6 +364,7 @@ class StreamHandler:
             "summary": summary,
             "removed_count": removed,
             "kept_count": kept,
+            "trigger_reason": event.data.get("trigger_reason", "auto"),
         })
         self._console.print(
             f"\n  [bold yellow]⚡ 上下文已压缩[/bold yellow] "
@@ -375,6 +378,15 @@ class StreamHandler:
             "pre_tokens": event.data.get("pre_tokens", 0),
             "post_tokens": event.data.get("post_tokens", 0),
         })
+
+    def on_session_memory_updated(self, event: AgentEvent) -> None:
+        self._session.record(make_session_memory_update_record(
+            summary_path=event.data.get("summary_path", ""),
+            last_summarized_message_id=event.data.get("last_summarized_message_id"),
+            tokens_at_last_extraction=event.data.get("tokens_at_last_extraction", 0),
+            tool_calls_since_last_update=event.data.get("tool_calls_since_last_update", 0),
+            turn=event.data.get("turn", 0),
+        ))
 
     def on_error(self, event: AgentEvent) -> None:
         self.end_stream()

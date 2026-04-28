@@ -18,7 +18,13 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Huma
 
 from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.context.auto_compact import AutoCompactDecision, AutoCompactPolicy, QuerySource
-from core.context.budget import budget_snapshot
+from core.context.budget import budget_snapshot, estimate_message_tokens
+from core.context.session_memory import (
+    SessionMemoryManager,
+    SessionMemoryStatus,
+    is_session_memory_summary_message,
+    should_extract_memory,
+)
 from core.event_bus import AgentEvent, EventBus, EventType
 from core.context.message_invariants import (
     is_compact_boundary_message,
@@ -49,6 +55,7 @@ def create_reasoning_node(
     session_stats: SessionStats | None = None,
     compressor: ContextCompressor | None = None,
     auto_compact_policy: AutoCompactPolicy | None = None,
+    session_memory_manager: SessionMemoryManager | None = None,
 ) -> Callable[[AgentState], dict]:
     """
     创建 reasoning 节点函数
@@ -111,7 +118,7 @@ def create_reasoning_node(
             _emit_auto_compact_checked(event_bus, decision, turn, auto_compact_policy.max_consecutive_failures)
 
             compress_result = _maybe_auto_compact(
-                compressor, event_bus, session_stats, state, decision, turn, query_source
+                compressor, event_bus, session_stats, state, decision, turn, query_source, session_memory_manager
             )
 
             if compress_result is not None:
@@ -191,6 +198,16 @@ def create_reasoning_node(
                 existing_fallbacks = [e for e in existing_fallbacks if e.get("tool_call_ids") != tool_call_ids]
                 existing_fallbacks.append({"tool_call_ids": tool_call_ids, "reasoning_content": reasoning_content})
                 result["assistant_reasoning_fallbacks"] = existing_fallbacks
+
+        session_memory_updates = _maybe_update_session_memory(
+            session_memory_manager=session_memory_manager,
+            event_bus=event_bus,
+            state=state,
+            ai_message=ai_message,
+            pending_tool_calls=pending,
+            turn=turn + 1,
+        )
+        result.update(session_memory_updates)
 
         # 合并压缩操作
         if compress_result is not None:
@@ -417,7 +434,7 @@ def _prepare_history_for_model(
             for msg in segment
         )
         has_compaction_marker = any(
-            is_compact_boundary_message(msg) or is_compact_summary_message(msg)
+            is_compact_boundary_message(msg) or is_compact_summary_message(msg) or is_session_memory_summary_message(msg)
             for msg in segment
         )
         if has_tool_calls or has_compaction_marker:
@@ -654,6 +671,7 @@ def _maybe_auto_compact(
     decision: AutoCompactDecision,
     turn: int,
     query_source: QuerySource | str,
+    session_memory_manager: SessionMemoryManager | None = None,
 ) -> CompressResult | None:
     """检查是否需要压缩，若需要则执行并返回 state 更新。"""
     if not decision.should_compact:
@@ -668,6 +686,49 @@ def _maybe_auto_compact(
         session_stats.last_input_tokens,
     )
     pre_tokens = session_stats.last_input_tokens
+
+    if session_memory_manager is not None:
+        session_memory_status = SessionMemoryStatus(
+            summary_path=state.get("session_memory_summary_path"),
+            last_summarized_message_id=state.get("session_memory_last_summarized_message_id"),
+            tokens_at_last_extraction=state.get("session_memory_tokens_at_last_extraction", 0),
+            tool_calls_since_last_update=state.get("session_memory_tool_calls_since_update", 0),
+            last_update_turn=state.get("session_memory_last_update_turn", 0),
+        )
+        session_memory_result = session_memory_manager.try_session_memory_compact(
+            messages=history,
+            status=session_memory_status,
+            threshold_tokens=session_stats.last_auto_compact_threshold,
+            min_keep_tokens=CONTEXT_CONFIG["compression_preserve_min_tokens"],
+            max_keep_tokens=CONTEXT_CONFIG["compression_preserve_max_tokens"],
+        )
+        if session_memory_result is not None:
+            session_stats.compression_failure_count = 0
+            event_bus.emit(AgentEvent(
+                type=EventType.CONTEXT_COMPRESSED,
+                data={
+                    "summary": str(session_memory_result.summary_message.content),
+                    "removed_count": session_memory_result.start_index,
+                    "kept_count": len(history) - session_memory_result.start_index,
+                    "trigger_reason": "session_memory",
+                    "pre_tokens": pre_tokens,
+                    "post_tokens": session_memory_result.post_tokens,
+                },
+                turn=turn,
+            ))
+            event_bus.emit(AgentEvent(
+                type=EventType.COMPACT_BOUNDARY,
+                data={
+                    "reason": "session_memory",
+                    "pre_tokens": pre_tokens,
+                    "post_tokens": session_memory_result.post_tokens,
+                },
+                turn=turn,
+            ))
+            return _session_memory_result_to_compress_result(
+                session_memory_result,
+                history,
+            )
 
     try:
         result = compressor.compress(history, reason=str(decision.trigger_reason or "auto"))
@@ -730,6 +791,84 @@ def _maybe_auto_compact(
     )
 
     return result
+
+
+def _session_memory_result_to_compress_result(
+    session_memory_result,
+    history: list[BaseMessage],
+):
+    from core.context.compressor import CompressResult
+
+    remove_ids = [msg.id for msg in history[:session_memory_result.start_index] if msg.id]
+    return CompressResult(
+        remove_message_ids=remove_ids,
+        boundary_message=session_memory_result.boundary_message,
+        summary_message=session_memory_result.summary_message,
+        summary_text=str(session_memory_result.summary_message.content),
+        compressed_messages=session_memory_result.compacted_messages,
+        removed_count=session_memory_result.start_index,
+        kept_count=len(history) - session_memory_result.start_index,
+        split_index=session_memory_result.start_index,
+        pre_tokens=estimate_message_tokens(history[:session_memory_result.start_index]),
+        post_tokens=session_memory_result.post_tokens,
+        reason="session_memory",
+    )
+
+
+def _maybe_update_session_memory(
+    *,
+    session_memory_manager: SessionMemoryManager | None,
+    event_bus: EventBus,
+    state: AgentState,
+    ai_message: AIMessage,
+    pending_tool_calls: list[ToolCallInfo],
+    turn: int,
+) -> dict[str, Any]:
+    if session_memory_manager is None:
+        return {
+            "session_memory_tool_calls_since_update": state.get("session_memory_tool_calls_since_update", 0) + len(pending_tool_calls),
+        }
+
+    history = list(state.get("messages", [])) + [ai_message]
+    current_tokens = estimate_message_tokens(history)
+    tokens_at_last_extraction = state.get("session_memory_tokens_at_last_extraction", 0)
+    tool_calls_since_update = state.get("session_memory_tool_calls_since_update", 0) + len(pending_tool_calls)
+    last_turn_has_tool_calls = bool(pending_tool_calls)
+
+    if not should_extract_memory(
+        current_tokens=current_tokens,
+        tokens_at_last_extraction=tokens_at_last_extraction,
+        tool_calls_since_last_update=tool_calls_since_update,
+        last_turn_has_tool_calls=last_turn_has_tool_calls,
+    ):
+        return {
+            "session_memory_tool_calls_since_update": tool_calls_since_update,
+        }
+
+    update_result = session_memory_manager.update_session_memory(
+        messages=history,
+        current_tokens=current_tokens,
+        tool_calls_since_last_update=tool_calls_since_update,
+        turn=turn,
+    )
+    event_bus.emit(AgentEvent(
+        type=EventType.SESSION_MEMORY_UPDATED,
+        data={
+            "summary_path": update_result.summary_path,
+            "last_summarized_message_id": update_result.last_summarized_message_id,
+            "tokens_at_last_extraction": update_result.tokens_at_last_extraction,
+            "tool_calls_since_last_update": update_result.tool_calls_since_last_update,
+            "turn": update_result.last_update_turn,
+        },
+        turn=turn,
+    ))
+    return {
+        "session_memory_summary_path": update_result.summary_path,
+        "session_memory_last_summarized_message_id": update_result.last_summarized_message_id,
+        "session_memory_tokens_at_last_extraction": update_result.tokens_at_last_extraction,
+        "session_memory_tool_calls_since_update": update_result.tool_calls_since_last_update,
+        "session_memory_last_update_turn": update_result.last_update_turn,
+    }
 
 
 def _build_compression_message_ops(result: CompressResult) -> list:

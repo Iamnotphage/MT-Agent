@@ -206,3 +206,41 @@ def test_render_resumed_history_uses_assistant_reasoning_content():
     rendered = console.export_text()
     assert "💭 I should read the file first." in rendered
     assert "⏺ I found the file." in rendered
+
+
+def test_build_resume_messages_uses_session_memory_summary(tmp_path):
+    recorder, _ = _make_recorder(tmp_path)
+    summary_dir = recorder.get_session_memory_artifact_dir()
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    (summary_dir / "summary.md").write_text("# Session Title\nSaved memory", encoding="utf-8")
+
+    recorder.record({
+        "type": "session_memory_update",
+        "summary_path": "session-memory/summary.md",
+        "last_summarized_message_id": "m2",
+        "tokens_at_last_extraction": 12000,
+        "tool_calls_since_last_update": 0,
+        "turn": 1,
+    })
+    recorder.record({
+        "type": "compression",
+        "summary": "<session_memory_summary path=\"session-memory/summary.md\">ignored</session_memory_summary>",
+        "removed_count": 2,
+        "kept_count": 1,
+        "trigger_reason": "session_memory",
+    })
+    recorder.record({
+        "type": "compact_boundary",
+        "reason": "session_memory",
+        "pre_tokens": 100,
+        "post_tokens": 30,
+    })
+    recorder.record({"type": "transcript_message", "role": "user", "content": "continue"})
+    filepath = recorder.flush()
+
+    messages = recorder.build_resume_messages(filepath)
+
+    assert messages[0].content.startswith("<compact_boundary ")
+    assert messages[1].content.startswith("<session_memory_summary ")
+    assert "Saved memory" in messages[1].content
+    assert messages[2].content == "continue"

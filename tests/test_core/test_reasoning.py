@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.event_bus import EventType
 from core.context.compressor import ContextCompressor
+from core.context.session_memory import SessionMemoryCompactResult, SessionMemoryManager, build_session_memory_summary_message
 from core.session import SessionStats
 from core.nodes.reasoning import _record_token_usage, create_reasoning_node, should_use_tools
 
@@ -475,6 +476,109 @@ class TestReasoningNode:
         compacted_assistant = streamed_messages[-2]
         assert isinstance(compacted_assistant, AIMessage)
         assert compacted_assistant.additional_kwargs["reasoning_content"] == "tool-backed turn reasoning"
+
+    def test_session_memory_update_event_and_state_fields(self, event_bus, tmp_path, mock_llm_text):
+        received = []
+        event_bus.subscribe(EventType.SESSION_MEMORY_UPDATED, lambda e: received.append(e))
+        llm = MagicMock()
+        llm.invoke.return_value = MagicMock(content="# Session Title\nUpdated")
+        session_memory_manager = SessionMemoryManager(
+            working_directory=str(tmp_path),
+            config={"global_dir": str(tmp_path / "global")},
+            session_id="sid",
+            llm=llm,
+        )
+
+        node = create_reasoning_node(
+            mock_llm_text,
+            event_bus,
+            session_memory_manager=session_memory_manager,
+        )
+        state = {
+            "messages": [HumanMessage(content="x" * 50000, id="u1")],
+            "turn_count": 0,
+            "session_memory_tokens_at_last_extraction": 0,
+            "session_memory_tool_calls_since_update": 0,
+        }
+
+        result = node(state)
+
+        assert len(received) == 1
+        assert result["session_memory_summary_path"] == "session-memory/summary.md"
+        assert result["session_memory_tokens_at_last_extraction"] > 0
+
+    def test_auto_compact_prefers_session_memory_before_full_compact(self, event_bus, tmp_path, mock_llm_text):
+        old_limit = CONTEXT_CONFIG["token_limit"]
+        old_reserved = CONTEXT_CONFIG["summary_reserved_tokens"]
+        old_buffer = CONTEXT_CONFIG["autocompact_buffer_tokens"]
+        CONTEXT_CONFIG["token_limit"] = 220
+        CONTEXT_CONFIG["summary_reserved_tokens"] = 20
+        CONTEXT_CONFIG["autocompact_buffer_tokens"] = 20
+        stats = SessionStats()
+        compressor = MagicMock()
+        session_memory_manager = SessionMemoryManager(
+            working_directory=str(tmp_path),
+            config={"global_dir": str(tmp_path / "global")},
+            session_id="sid",
+        )
+        session_memory_manager.try_session_memory_compact = MagicMock(return_value=SessionMemoryCompactResult(
+            boundary_message=ContextCompressor.build_compact_boundary_message(
+                pre_tokens=100,
+                post_tokens=30,
+                reason="session_memory",
+            ),
+            summary_message=build_session_memory_summary_message(
+                "# Session Title\nSaved memory",
+                summary_path="session-memory/summary.md",
+            ),
+            compacted_messages=[
+                ContextCompressor.build_compact_boundary_message(
+                    pre_tokens=100,
+                    post_tokens=30,
+                    reason="session_memory",
+                ),
+                build_session_memory_summary_message(
+                    "# Session Title\nSaved memory",
+                    summary_path="session-memory/summary.md",
+                ),
+                AIMessage(content="a2", id="m4"),
+            ],
+            last_summarized_message_id="m3",
+            start_index=3,
+            kept_tokens=10,
+            post_tokens=30,
+        ))
+        received = []
+        event_bus.subscribe(EventType.CONTEXT_COMPRESSED, lambda e: received.append(e))
+
+        try:
+            node = create_reasoning_node(
+                mock_llm_text,
+                event_bus,
+                session_stats=stats,
+                compressor=compressor,
+                session_memory_manager=session_memory_manager,
+            )
+            state = {
+                "messages": [
+                    HumanMessage(content="u1" * 200, id="m1"),
+                    AIMessage(content="a1" * 200, id="m2"),
+                    HumanMessage(content="u2", id="m3"),
+                    AIMessage(content="a2", id="m4"),
+                ],
+                "turn_count": 1,
+                "session_memory_summary_path": "session-memory/summary.md",
+            }
+            result = node(state)
+        finally:
+            CONTEXT_CONFIG["token_limit"] = old_limit
+            CONTEXT_CONFIG["summary_reserved_tokens"] = old_reserved
+            CONTEXT_CONFIG["autocompact_buffer_tokens"] = old_buffer
+
+        compressor.compress.assert_not_called()
+        assert any(getattr(msg, "content", "").startswith("<compact_boundary ") for msg in result["messages"] if hasattr(msg, "content"))
+        assert any("session_memory_summary" in getattr(msg, "content", "") for msg in result["messages"] if hasattr(msg, "content"))
+        assert received[0].data["trigger_reason"] == "session_memory"
 
 
 class TestShouldUseTools:

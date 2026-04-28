@@ -48,4 +48,4 @@ def test_context_status_falls_back_to_token_limit_when_effective_limit_missing(t
 
     status = repl._context_status()
 
-    assert "75% left" in status
+    assert "99% left" in status

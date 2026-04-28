@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from core.context import ContextManager
     from core.session import SessionStats
     from core.context.compressor import ContextCompressor
+    from core.context.session_memory import SessionMemoryManager
     from tools.base import BaseTool
 
 
@@ -27,6 +28,7 @@ def build_agent_graph(
     context_manager: ContextManager | None = None,
     session_stats: SessionStats | None = None,
     compressor: ContextCompressor | None = None,
+    session_memory_manager: SessionMemoryManager | None = None,
 ) -> StateGraph:
     """
     工厂模式创建结点，构建 ReAct 循环的 LangGraph 状态图
@@ -42,7 +44,15 @@ def build_agent_graph(
     """
 
     # 工厂模式创建结点函数
-    reasoning_node = create_reasoning_node(llm, event_bus, tools, context_manager, session_stats, compressor)
+    reasoning_node = create_reasoning_node(
+        llm,
+        event_bus,
+        tools,
+        context_manager,
+        session_stats,
+        compressor,
+        session_memory_manager=session_memory_manager,
+    )
     tool_routing_node = create_tool_routing_node(event_bus)
     human_approval_node = create_human_approval_node(event_bus)
 

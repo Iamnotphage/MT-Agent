@@ -1,12 +1,15 @@
 from core.session.schema import (
     RECORD_COMPACT_BOUNDARY,
+    RECORD_SESSION_MEMORY_UPDATE,
     RECORD_TRANSCRIPT_MESSAGE,
     is_renderable_record,
     make_compact_boundary_record,
+    make_session_memory_update_record,
     make_session_start_record,
     make_tool_result_artifact_record,
     make_transcript_message_record,
     normalize_compact_boundary_record,
+    normalize_session_memory_update_record,
     normalize_transcript_record,
 )
 
@@ -73,3 +76,29 @@ def test_normalize_compact_boundary_record():
     assert record["pre_tokens"] == 0
     assert record["post_tokens"] == 0
     assert "timestamp" in record
+
+
+def test_make_session_memory_update_record():
+    record = make_session_memory_update_record(
+        summary_path="session-memory/summary.md",
+        last_summarized_message_id="m1",
+        tokens_at_last_extraction=123,
+        tool_calls_since_last_update=0,
+        turn=5,
+    )
+    assert record["type"] == RECORD_SESSION_MEMORY_UPDATE
+    assert record["summary_path"] == "session-memory/summary.md"
+    assert record["last_summarized_message_id"] == "m1"
+    assert record["tokens_at_last_extraction"] == 123
+    assert record["turn"] == 5
+
+
+def test_normalize_session_memory_update_record():
+    record = normalize_session_memory_update_record({
+        "type": "session_memory_update",
+        "summary_path": "session-memory/summary.md",
+    })
+    assert record["last_summarized_message_id"] is None
+    assert record["tokens_at_last_extraction"] == 0
+    assert record["tool_calls_since_last_update"] == 0
+    assert record["turn"] == 0

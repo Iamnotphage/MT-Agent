@@ -14,6 +14,7 @@ from typing import Any
 from config import load_llm_config
 from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.context.compressor import ContextCompressor
+from core.context.session_memory import SessionMemoryManager
 from core.context import ContextManager
 from core.memory import MemoryManager
 from core.session import SessionRecorder
@@ -89,6 +90,12 @@ def create_agent_runtime(
         preserve_min_tokens=CONTEXT_CONFIG.get("compression_preserve_min_tokens", 10000),
         preserve_max_tokens=CONTEXT_CONFIG.get("compression_preserve_max_tokens", 40000),
     )
+    session_memory_manager = SessionMemoryManager(
+        working_directory=ws,
+        config=CONTEXT_CONFIG,
+        session_id=session.stats.session_id,
+        llm=compressor_llm,
+    )
 
     checkpoint_path = session.get_checkpoint_path()
     checkpoint_manager = SqliteSaver.from_conn_string(str(checkpoint_path))
@@ -103,6 +110,7 @@ def create_agent_runtime(
         context_manager=ctx_manager,
         session_stats=session.stats,
         compressor=compressor,
+        session_memory_manager=session_memory_manager,
     )
 
     return AgentRuntime(

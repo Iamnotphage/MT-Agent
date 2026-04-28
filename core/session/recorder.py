@@ -18,11 +18,13 @@ from core.session.artifacts import (
     get_session_artifact_dir,
     get_session_memory_dir,
     get_tool_result_path,
+    resolve_session_relative_artifact,
 )
 from core.session.schema import (
     RECORD_COMPACT_BOUNDARY,
     RECORD_COMPRESSION,
     RECORD_SESSION_END,
+    RECORD_SESSION_MEMORY_UPDATE,
     RECORD_SESSION_START,
     get_record_type,
     is_renderable_record,
@@ -30,6 +32,7 @@ from core.session.schema import (
     make_session_end_record,
     make_session_start_record,
     normalize_compact_boundary_record,
+    normalize_session_memory_update_record,
     normalize_transcript_record,
 )
 from core.session.stats import SessionStats
@@ -64,6 +67,16 @@ def format_file_size(size_bytes: int) -> str:
     if size_bytes < 1024 * 1024:
         return f"{size_bytes / 1024:.1f}KB"
     return f"{size_bytes / (1024 * 1024):.1f}MB"
+
+
+def _build_session_memory_summary_message(summary_text: str, *, summary_path: str) -> HumanMessage:
+    return HumanMessage(
+        content=(
+            f'<session_memory_summary path="{summary_path}">\n'
+            f"{summary_text}\n"
+            "</session_memory_summary>"
+        )
+    )
 
 
 class SessionRecorder:
@@ -176,6 +189,8 @@ class SessionRecorder:
                 if rtype not in {RECORD_SESSION_START, RECORD_SESSION_END}:
                     if is_transcript_message_record(record):
                         record = normalize_transcript_record(record)
+                    elif rtype == RECORD_SESSION_MEMORY_UPDATE:
+                        record = normalize_session_memory_update_record(record)
                     records.append(record)
             except json.JSONDecodeError:
                 continue
@@ -187,16 +202,23 @@ class SessionRecorder:
 
         last_compression_idx = -1
         summary_text = ""
+        compression_trigger_reason = "auto"
         boundary_record: dict[str, Any] | None = None
         last_boundary_idx = -1
+        session_memory_record: dict[str, Any] | None = None
+        last_session_memory_idx = -1
         for idx, record in enumerate(records):
             rtype = get_record_type(record)
             if rtype == RECORD_COMPRESSION:
                 last_compression_idx = idx
                 summary_text = str(record.get("summary", "")).strip()
+                compression_trigger_reason = str(record.get("trigger_reason", "auto") or "auto")
             elif rtype == RECORD_COMPACT_BOUNDARY:
                 last_boundary_idx = idx
                 boundary_record = normalize_compact_boundary_record(record)
+            elif rtype == RECORD_SESSION_MEMORY_UPDATE:
+                last_session_memory_idx = idx
+                session_memory_record = normalize_session_memory_update_record(record)
 
         resumed: list[BaseMessage] = []
         if boundary_record:
@@ -205,10 +227,17 @@ class SessionRecorder:
                 post_tokens=int(boundary_record.get("post_tokens", 0) or 0),
                 reason=str(boundary_record.get("reason", "auto") or "auto"),
             ))
-        if summary_text:
+        if compression_trigger_reason == "session_memory" and session_memory_record:
+            session_summary_text = self._load_session_memory_summary_text(session_memory_record)
+            if session_summary_text:
+                resumed.append(_build_session_memory_summary_message(
+                    session_summary_text,
+                    summary_path=str(session_memory_record.get("summary_path", "")),
+                ))
+        elif summary_text:
             resumed.append(ContextCompressor.build_summary_message(summary_text))
 
-        start_idx = max(last_compression_idx, last_boundary_idx) + 1 if (last_compression_idx >= 0 or last_boundary_idx >= 0) else 0
+        start_idx = max(last_compression_idx, last_boundary_idx, last_session_memory_idx) + 1 if (last_compression_idx >= 0 or last_boundary_idx >= 0 or last_session_memory_idx >= 0) else 0
         tail_records = records[start_idx:]
         transcript_records = [r for r in tail_records if is_transcript_message_record(r)]
         resumed.extend(self._build_messages_from_transcript(transcript_records))
@@ -342,6 +371,20 @@ class SessionRecorder:
             self._config,
             self.stats.session_id,
         )
+
+    def _load_session_memory_summary_text(self, record: dict[str, Any]) -> str:
+        summary_path = str(record.get("summary_path", "") or "")
+        if not summary_path or not self.stats.session_id:
+            return ""
+        path = resolve_session_relative_artifact(
+            str(self._working_dir),
+            self._config,
+            self.stats.session_id,
+            summary_path,
+        )
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8").strip()
 
     def get_checkpoint_path(self) -> Path:
         """当前项目的 LangGraph checkpoint SQLite 文件路径。"""

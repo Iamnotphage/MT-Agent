@@ -96,6 +96,7 @@ def make_compression_record(
     summary: str,
     removed_count: int = 0,
     kept_count: int = 0,
+    trigger_reason: str = "auto",
     timestamp: int | None = None,
 ) -> dict[str, Any]:
     return {
@@ -103,6 +104,7 @@ def make_compression_record(
         "summary": summary,
         "removed_count": removed_count,
         "kept_count": kept_count,
+        "trigger_reason": trigger_reason,
         "timestamp": _timestamp(timestamp),
     }
 
@@ -142,11 +144,19 @@ def make_tool_result_artifact_record(
 def make_session_memory_update_record(
     *,
     summary_path: str,
+    last_summarized_message_id: str | None = None,
+    tokens_at_last_extraction: int = 0,
+    tool_calls_since_last_update: int = 0,
+    turn: int = 0,
     timestamp: int | None = None,
 ) -> dict[str, Any]:
     return {
         "type": RECORD_SESSION_MEMORY_UPDATE,
         "summary_path": summary_path,
+        "last_summarized_message_id": last_summarized_message_id,
+        "tokens_at_last_extraction": tokens_at_last_extraction,
+        "tool_calls_since_last_update": tool_calls_since_last_update,
+        "turn": turn,
         "timestamp": _timestamp(timestamp),
     }
 
@@ -185,6 +195,19 @@ def normalize_compact_boundary_record(record: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("reason", "auto")
     normalized.setdefault("pre_tokens", 0)
     normalized.setdefault("post_tokens", 0)
+    if "timestamp" not in normalized:
+        normalized["timestamp"] = _timestamp()
+    return normalized
+
+
+def normalize_session_memory_update_record(record: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(record)
+    normalized["type"] = RECORD_SESSION_MEMORY_UPDATE
+    normalized.setdefault("summary_path", "")
+    normalized.setdefault("last_summarized_message_id", None)
+    normalized.setdefault("tokens_at_last_extraction", 0)
+    normalized.setdefault("tool_calls_since_last_update", 0)
+    normalized.setdefault("turn", 0)
     if "timestamp" not in normalized:
         normalized["timestamp"] = _timestamp()
     return normalized

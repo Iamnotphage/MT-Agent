@@ -92,3 +92,24 @@ def test_compact_boundary_event_is_recorded(tmp_path):
 
     assert session._records[0]["type"] == "compact_boundary"
     assert session._records[0]["pre_tokens"] == 100
+
+
+def test_session_memory_updated_event_is_recorded(tmp_path):
+    session = _make_session(tmp_path)
+    bus = EventBus()
+    StreamHandler(Console(record=True, width=100), bus, session)
+
+    bus.emit(AgentEvent(
+        type=EventType.SESSION_MEMORY_UPDATED,
+        data={
+            "summary_path": "session-memory/summary.md",
+            "last_summarized_message_id": "m3",
+            "tokens_at_last_extraction": 12000,
+            "tool_calls_since_last_update": 0,
+            "turn": 4,
+        },
+    ))
+
+    assert session._records[0]["type"] == "session_memory_update"
+    assert session._records[0]["summary_path"] == "session-memory/summary.md"
+    assert session._records[0]["last_summarized_message_id"] == "m3"
