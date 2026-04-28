@@ -134,8 +134,8 @@ class OpenAICompatChatModel(BaseChatModel):
                 content = delta.content or ""
                 reasoning_content = _maybe_get_attr(delta, "reasoning_content")
                 tool_call_chunks = self._tool_call_chunks_from_delta(delta)
-                if reasoning_content:
-                    additional_kwargs["reasoning_content"] = reasoning_content
+                if _has_attr(delta, "reasoning_content"):
+                    additional_kwargs["reasoning_content"] = reasoning_content or ""
 
             if not content and not additional_kwargs and not tool_call_chunks and usage is None:
                 continue
@@ -220,9 +220,8 @@ class OpenAICompatChatModel(BaseChatModel):
                 "role": "assistant",
                 "content": message.content or None,
             }
-            reasoning_content = (message.additional_kwargs or {}).get("reasoning_content")
-            if reasoning_content:
-                data["reasoning_content"] = reasoning_content
+            if "reasoning_content" in (message.additional_kwargs or {}):
+                data["reasoning_content"] = (message.additional_kwargs or {}).get("reasoning_content", "")
             tool_calls = OpenAICompatChatModel._tool_calls_to_openai(message.tool_calls)
             if tool_calls:
                 data["tool_calls"] = tool_calls
@@ -289,8 +288,8 @@ class OpenAICompatChatModel(BaseChatModel):
     def _message_from_response(message: Any) -> AIMessage:
         reasoning_content = _maybe_get_attr(message, "reasoning_content")
         additional_kwargs = {}
-        if reasoning_content:
-            additional_kwargs["reasoning_content"] = reasoning_content
+        if _has_attr(message, "reasoning_content"):
+            additional_kwargs["reasoning_content"] = reasoning_content or ""
 
         return AIMessage(
             content=message.content or "",
@@ -317,6 +316,13 @@ def _maybe_get_attr(obj: Any, name: str) -> Any:
     if isinstance(extra, dict):
         return extra.get(name)
     return None
+
+
+def _has_attr(obj: Any, name: str) -> bool:
+    if hasattr(obj, name):
+        return True
+    extra = getattr(obj, "model_extra", None)
+    return isinstance(extra, dict) and name in extra
 
 
 def _usage_to_langchain_usage(usage: dict[str, Any]) -> dict[str, Any]:

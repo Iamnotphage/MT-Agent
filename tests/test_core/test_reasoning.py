@@ -359,6 +359,30 @@ class TestReasoningNode:
         assistant = result["messages"][0]
         assert assistant.additional_kwargs["reasoning_content"] == "Let me inspect files."
 
+    def test_empty_reasoning_content_is_preserved_for_tool_loop(self, event_bus):
+        llm = MagicMock()
+        llm.bind_tools.return_value = llm
+        llm.stream.return_value = iter([
+            AIMessageChunk(
+                content="",
+                additional_kwargs={"reasoning_content": ""},
+                tool_call_chunks=[{
+                    "name": "read_file",
+                    "args": '{"path": "a.py"}',
+                    "id": "call_123",
+                    "index": 0,
+                }],
+            )
+        ])
+
+        node = create_reasoning_node(llm, event_bus)
+        state = {"messages": [HumanMessage(content="inspect file")], "turn_count": 0}
+        result = node(state)
+
+        assistant = result["messages"][0]
+        assert "reasoning_content" in assistant.additional_kwargs
+        assert assistant.additional_kwargs["reasoning_content"] == ""
+
     def test_old_reasoning_content_is_cleared_when_prior_turn_had_no_tools(self, event_bus, mock_llm_text):
         node = create_reasoning_node(mock_llm_text, event_bus)
         history = [

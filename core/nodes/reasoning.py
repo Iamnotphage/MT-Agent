@@ -147,11 +147,12 @@ def create_reasoning_node(
             _update_context_budget_stats_from_count(session_stats.last_input_tokens, session_stats)
 
         # 7) 构造 AIMessage
+        collected_additional = dict(collected.additional_kwargs or {})
         reasoning_content = _extract_reasoning_content(collected)
         ai_message = AIMessage(
             content=collected.content or "",
             tool_calls=collected.tool_calls or [],
-            additional_kwargs={"reasoning_content": reasoning_content} if reasoning_content else {},
+            additional_kwargs={"reasoning_content": reasoning_content} if "reasoning_content" in collected_additional else {},
         )
         event_bus.emit(AgentEvent(
             type=EventType.TRANSCRIPT_MESSAGE,
@@ -183,7 +184,7 @@ def create_reasoning_node(
         }
 
         # 保存 reasoning_content fallback
-        if pending and reasoning_content:
+        if pending and "reasoning_content" in collected_additional:
             existing_fallbacks = list(state.get("assistant_reasoning_fallbacks", []))
             tool_call_ids = [tc["id"] for tc in ai_message.tool_calls or [] if tc.get("id")]
             if tool_call_ids:
@@ -250,7 +251,7 @@ def _stream_with_events(
 
             # 思考过程 → THOUGHT (DeepSeek-R1 等模型的 reasoning_content)
             reasoning = (chunk.additional_kwargs or {}).get("reasoning_content")
-            if reasoning:
+            if "reasoning_content" in (chunk.additional_kwargs or {}):
                 reasoning_parts.append(reasoning)
                 event_bus.emit(AgentEvent(
                     type=EventType.THOUGHT,
@@ -365,7 +366,7 @@ def _stream_with_events(
         ))
         raise err
 
-    if reasoning_parts:
+    if reasoning_parts or "reasoning_content" in (collected.additional_kwargs or {}):
         merged_reasoning = "".join(reasoning_parts)
         additional_kwargs = dict(collected.additional_kwargs or {})
         additional_kwargs["reasoning_content"] = merged_reasoning
@@ -433,14 +434,15 @@ def _prepare_history_for_model(
                     break
 
             should_preserve = seg_idx in preserve_reasoning_segments
-            reasoning_content = (message.additional_kwargs or {}).get("reasoning_content")
+            additional_kwargs = dict(message.additional_kwargs or {})
+            has_reasoning_content = "reasoning_content" in additional_kwargs
+            reasoning_content = additional_kwargs.get("reasoning_content")
 
             # 从 fallback 恢复
-            if not reasoning_content and message.tool_calls:
+            if not has_reasoning_content and message.tool_calls:
                 tool_call_ids = tuple(str(tc.get("id")) for tc in message.tool_calls if tc.get("id"))
                 fallback_reasoning = fallback_by_tool_ids.get(tool_call_ids)
                 if fallback_reasoning:
-                    additional_kwargs = dict(message.additional_kwargs or {})
                     additional_kwargs["reasoning_content"] = fallback_reasoning
                     message = AIMessage(
                         content=message.content,
@@ -450,10 +452,10 @@ def _prepare_history_for_model(
                         response_metadata=getattr(message, "response_metadata", None) or {},
                     )
                     reasoning_content = fallback_reasoning
+                    has_reasoning_content = True
 
             # 移除不需要保留的 reasoning_content
-            if reasoning_content and not should_preserve:
-                additional_kwargs = dict(message.additional_kwargs or {})
+            if has_reasoning_content and not should_preserve:
                 additional_kwargs.pop("reasoning_content", None)
                 message = AIMessage(
                     content=message.content,
@@ -468,8 +470,10 @@ def _prepare_history_for_model(
 
 
 def _extract_reasoning_content(response: AIMessageChunk) -> str | None:
+    if "reasoning_content" not in (response.additional_kwargs or {}):
+        return None
     reasoning_content = (response.additional_kwargs or {}).get("reasoning_content")
-    if isinstance(reasoning_content, str) and reasoning_content:
+    if isinstance(reasoning_content, str):
         return reasoning_content
     return None
 

@@ -237,7 +237,7 @@ class SessionRecorder:
             elif role == "assistant":
                 additional_kwargs: dict[str, Any] = {}
                 reasoning_content = record.get("reasoning_content")
-                if reasoning_content:
+                if reasoning_content is not None:
                     additional_kwargs["reasoning_content"] = reasoning_content
                 messages.append(AIMessage(
                     content=content,

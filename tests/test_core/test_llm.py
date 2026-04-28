@@ -83,6 +83,23 @@ class TestPayloadSerialization:
         assert payload["role"] == "assistant"
         assert payload["reasoning_content"] == "need one more tool step"
 
+    def test_empty_assistant_reasoning_content_is_included(self):
+        payload = OpenAICompatChatModel._message_to_dict(
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "read_file",
+                    "args": {"path": "a.py"},
+                    "id": "call_1",
+                    "type": "tool_call",
+                }],
+                additional_kwargs={"reasoning_content": ""},
+            )
+        )
+
+        assert "reasoning_content" in payload
+        assert payload["reasoning_content"] == ""
+
     def test_assistant_tool_calls_are_included(self):
         payload = OpenAICompatChatModel._message_to_dict(
             AIMessage(

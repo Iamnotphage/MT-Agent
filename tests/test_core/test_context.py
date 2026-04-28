@@ -665,6 +665,27 @@ class TestSessionListAndLoad:
         assert len(messages) == 1
         assert messages[0].additional_kwargs["reasoning_content"] == "need one more tool step"
 
+    def test_build_resume_messages_restores_empty_reasoning_content(self, recorder):
+        recorder.record({
+            "type": "transcript_message",
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "",
+            "tool_calls": [{
+                "name": "read_file",
+                "args": {"path": "a.py"},
+                "id": "call_1",
+                "type": "tool_call",
+            }],
+        })
+        filepath = recorder.flush()
+
+        messages = recorder.build_resume_messages(filepath)
+
+        assert len(messages) == 1
+        assert "reasoning_content" in messages[0].additional_kwargs
+        assert messages[0].additional_kwargs["reasoning_content"] == ""
+
     def test_build_resume_messages_accepts_new_tool_fields(self, recorder):
         """新 transcript 字段不应破坏 ToolMessage 恢复。"""
         recorder.record({
