@@ -612,3 +612,111 @@ class TestTokenUsageFallback:
         assert stats.turn_count == 1
         assert stats.total_input_tokens == 123
         assert stats.total_output_tokens > 0
+
+
+class TestTimeBasedMicrocompact:
+
+    def test_reasoning_uses_microcompacted_view_after_long_pause(self, event_bus, mock_llm_text):
+        from core.context.microcompact import MICROCOMPACT_PLACEHOLDER
+
+        old_messages = [
+            AIMessage(content="prior assistant reply", response_metadata={"timestamp_ms": 100}),
+            ToolMessage(content="old grep 1", tool_call_id="call_1", name="grep"),
+            ToolMessage(content="old grep 2", tool_call_id="call_2", name="grep"),
+            ToolMessage(content="old shell 1", tool_call_id="call_3", name="shell"),
+            ToolMessage(content="old shell 2", tool_call_id="call_4", name="shell"),
+            ToolMessage(content="old glob 1", tool_call_id="call_5", name="glob"),
+            ToolMessage(content="old glob 2", tool_call_id="call_6", name="glob"),
+            ToolMessage(content="recent read_file output", tool_call_id="call_7", name="read_file"),
+        ]
+        state = {
+            "messages": old_messages,
+            "turn_count": 1,
+            "query_source": "interactive",
+        }
+
+        node = create_reasoning_node(mock_llm_text, event_bus)
+        node(state)
+
+        streamed_messages = mock_llm_text.stream.call_args.args[0]
+        placeholder_count = sum(
+            1 for msg in streamed_messages
+            if getattr(msg, "content", "") == MICROCOMPACT_PLACEHOLDER
+        )
+        assert placeholder_count > 0
+
+    def test_reasoning_microcompact_does_not_modify_state_messages(self, event_bus, mock_llm_text):
+        original_content = "old grep output"
+        old_messages = [
+            AIMessage(content="prior reply", response_metadata={"timestamp_ms": 100}),
+            ToolMessage(content=original_content, tool_call_id="call_1", name="grep"),
+            ToolMessage(content="old shell", tool_call_id="call_2", name="shell"),
+            ToolMessage(content="old glob", tool_call_id="call_3", name="glob"),
+            ToolMessage(content="old ls", tool_call_id="call_4", name="ls"),
+            ToolMessage(content="old write", tool_call_id="call_5", name="write_file"),
+            ToolMessage(content="old edit", tool_call_id="call_6", name="edit_file"),
+            ToolMessage(content="recent output", tool_call_id="call_7", name="read_file"),
+        ]
+        state = {
+            "messages": old_messages,
+            "turn_count": 1,
+            "query_source": "interactive",
+        }
+
+        node = create_reasoning_node(mock_llm_text, event_bus)
+        node(state)
+
+        assert state["messages"][1].content == original_content
+
+    def test_reasoning_microcompact_does_not_trigger_for_compact_source(self, event_bus, mock_llm_text):
+        from core.context.microcompact import MICROCOMPACT_PLACEHOLDER
+
+        old_messages = [
+            AIMessage(content="prior reply", response_metadata={"timestamp_ms": 100}),
+            ToolMessage(content="old grep output", tool_call_id="call_1", name="grep"),
+        ]
+        state = {
+            "messages": old_messages,
+            "turn_count": 1,
+            "query_source": "compact",
+        }
+
+        node = create_reasoning_node(mock_llm_text, event_bus)
+        node(state)
+
+        streamed_messages = mock_llm_text.stream.call_args.args[0]
+        assert not any(
+            getattr(msg, "content", "") == MICROCOMPACT_PLACEHOLDER
+            for msg in streamed_messages
+        )
+
+    def test_reasoning_microcompact_does_not_emit_transcript_rewrite(self, event_bus, mock_llm_text):
+        from core.context.microcompact import MICROCOMPACT_PLACEHOLDER
+
+        seen = []
+        event_bus.subscribe(EventType.TRANSCRIPT_MESSAGE, lambda e: seen.append(e))
+
+        old_messages = [
+            AIMessage(content="prior reply", response_metadata={"timestamp_ms": 100}),
+            ToolMessage(content="old grep", tool_call_id="call_1", name="grep"),
+            ToolMessage(content="old shell", tool_call_id="call_2", name="shell"),
+            ToolMessage(content="old glob", tool_call_id="call_3", name="glob"),
+            ToolMessage(content="old ls", tool_call_id="call_4", name="ls"),
+            ToolMessage(content="old write", tool_call_id="call_5", name="write_file"),
+            ToolMessage(content="old edit", tool_call_id="call_6", name="edit_file"),
+            ToolMessage(content="recent output", tool_call_id="call_7", name="read_file"),
+        ]
+        state = {
+            "messages": old_messages,
+            "turn_count": 1,
+            "query_source": "interactive",
+        }
+
+        node = create_reasoning_node(mock_llm_text, event_bus)
+        node(state)
+
+        assert not any(
+            e.data.get("content") == MICROCOMPACT_PLACEHOLDER
+            and e.data.get("role") == "tool"
+            for e in seen
+        )

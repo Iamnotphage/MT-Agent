@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable
 
 from langchain_core.language_models import BaseChatModel
@@ -18,6 +19,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Huma
 
 from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.context.auto_compact import AutoCompactDecision, AutoCompactPolicy, QuerySource
+from core.context.microcompact import maybe_time_based_microcompact
 from core.context.budget import budget_snapshot, estimate_message_tokens
 from core.context.session_memory import (
     SessionMemoryStatus,
@@ -102,6 +104,10 @@ def create_reasoning_node(
         prepared_history = _prepare_history_for_model(
             list(state.get("messages", [])),
             list(state.get("assistant_reasoning_fallbacks", [])),
+        )
+        prepared_history = _apply_time_based_microcompact_if_needed(
+            prepared_history,
+            query_source=query_source,
         )
         messages.extend(prepared_history)
 
@@ -936,3 +942,24 @@ def _build_compression_message_ops(result: CompressResult) -> list:
     message_ops.append(result.boundary_message)
     message_ops.append(result.summary_message)
     return message_ops
+
+
+def _apply_time_based_microcompact_if_needed(
+    history: list[BaseMessage],
+    *,
+    query_source: str,
+) -> list[BaseMessage]:
+    if query_source not in {"interactive", "resume"}:
+        return history
+
+    result = maybe_time_based_microcompact(
+        history,
+        now_ts_ms=int(time.time() * 1000),
+    )
+    if result.triggered:
+        logger.info(
+            "Time-based microcompact applied: cleared=%d query_source=%s",
+            result.cleared_count,
+            query_source,
+        )
+    return result.messages
