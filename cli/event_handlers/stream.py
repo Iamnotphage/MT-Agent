@@ -13,6 +13,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
@@ -20,6 +21,7 @@ from rich.console import Console
 from cli.utils.text import TOOL_DISPLAY, truncate
 from core.event_bus import AgentEvent, EventBus, EventType
 from core.session.schema import make_session_memory_update_record
+from tools.workspace_paths import display_path
 
 if TYPE_CHECKING:
     from core.session import SessionRecorder
@@ -43,9 +45,10 @@ class StreamHandler:
     # Spinner 动画帧（类似 Claude Code）
     SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-    def __init__(self, console: Console, event_bus: EventBus, session: SessionRecorder) -> None:
+    def __init__(self, console: Console, event_bus: EventBus, session: SessionRecorder, *, workspace: str | Path | None = None) -> None:
         self._console = console
         self._session = session
+        self._workspace = Path(workspace) if workspace else None
 
         # LLM 流式输出状态
         self._streaming = False
@@ -166,6 +169,10 @@ class StreamHandler:
         """结束所有流式输出 (含工具缓冲 flush)"""
         self._end_content_stream()
         self._flush_tool_buffer()
+
+    def pause_for_prompt(self) -> None:
+        """Stop active content/thought streaming without flushing buffered tool state."""
+        self._end_content_stream()
 
     # ── LLM 内容输出: ⏺ 白色 + 缩进 ────────────────────────────
 
@@ -290,6 +297,8 @@ class StreamHandler:
     def _render_tool_block(self, rec: _ToolRecord) -> None:
         name = TOOL_DISPLAY.get(rec.tool_name, rec.tool_name)
         file_path = rec.arguments.get("file_path")
+        if file_path and self._workspace:
+            file_path = display_path(self._workspace, Path(file_path))
 
         if rec.status == "error":
             dot_style = "bold red"

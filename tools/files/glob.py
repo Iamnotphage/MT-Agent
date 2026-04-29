@@ -10,7 +10,7 @@ from langchain_core.tools.base import ToolException
 from pydantic import BaseModel, Field
 
 from tools.base import BaseTool, ToolRiskLevel
-from tools.workspace_paths import ensure_within_workspace, resolve_workspace_path
+from tools.workspace_paths import display_path, ensure_within_workspace, resolve_workspace_path
 
 _ALWAYS_IGNORE = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
@@ -60,6 +60,7 @@ class GlobTool(BaseTool):
         respect_git_ignore: bool = True,
     ) -> tuple[str, dict]:
         resolved = resolve_workspace_path(self.workspace, path or ".")
+        display_root = display_path(self.workspace, resolved)
 
         if not resolved.exists():
             raise ToolException(f"Directory does not exist: {path}")
@@ -86,14 +87,14 @@ class GlobTool(BaseTool):
             filtered.append(match)
 
         if not filtered:
-            msg = f'Found 0 file(s) matching "{pattern}" within {path or "."}'
+            msg = f'Found 0 file(s) matching "{pattern}" within {display_root}'
             return msg, {"display": msg}
 
         filtered.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
         rel_paths = [str(p.relative_to(self.workspace)) for p in filtered]
         listing = "\n".join(rel_paths)
-        llm_output = f'Found {len(filtered)} file(s) matching "{pattern}" within {path or "."}, sorted by modification time (newest first):\n{listing}'
-        display = f'{path or "."} — {len(filtered)} file(s) matching "{pattern}"'
+        llm_output = f'Found {len(filtered)} file(s) matching "{pattern}" within {display_root}, sorted by modification time (newest first):\n{listing}'
+        display = f'{display_root} — {len(filtered)} file(s) matching "{pattern}"'
 
         return llm_output, {"display": display}

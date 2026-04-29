@@ -3,6 +3,7 @@ from rich.console import Console
 from cli.event_handlers.stream import StreamHandler
 from core.event_bus import AgentEvent, EventBus, EventType
 from core.session import SessionRecorder
+from core.utils.diff import generate_diff
 
 
 def _make_session(tmp_path):
@@ -113,3 +114,42 @@ def test_session_memory_updated_event_is_recorded(tmp_path):
     assert session._records[0]["type"] == "session_memory_update"
     assert session._records[0]["summary_path"] == "session-memory/summary.md"
     assert session._records[0]["last_summarized_message_id"] == "m3"
+
+
+def test_approved_tool_keeps_buffer_and_renders_diff(tmp_path):
+    """Approval prompt must not flush tool buffer — diff should still render after approval."""
+    session = _make_session(tmp_path)
+    bus = EventBus()
+    console = Console(record=True, width=100)
+    handler = StreamHandler(console, bus, session, workspace=tmp_path / "project")
+
+    # Tool request arrives (write_file, medium risk → needs approval)
+    bus.emit(AgentEvent(
+        type=EventType.TOOL_CALL_REQUEST,
+        data={
+            "call_id": "call_1",
+            "tool_name": "write_file",
+            "arguments": {"file_path": "temp6.md", "content": "new\n"},
+        },
+    ))
+
+    # Simulate what _prompt_approval does: stop content stream but keep tool buffer
+    handler.pause_for_prompt()
+
+    # Tool executes after approval — emits diff
+    diff = generate_diff("temp6.md", "old\n", "new\n", is_new=False)
+    bus.emit(AgentEvent(
+        type=EventType.TOOL_LIVE_OUTPUT,
+        data={"call_id": "call_1", "tool_name": "write_file", "kind": "diff", "diff": diff},
+    ))
+    bus.emit(AgentEvent(
+        type=EventType.TOOL_CALL_COMPLETE,
+        data={"call_id": "call_1", "tool_name": "write_file", "status": "success", "display": "temp6.md (+1 -1)"},
+    ))
+
+    rendered = console.export_text()
+    assert "Write(" in rendered
+    assert "temp6.md)" in rendered
+    assert "Added 1 lines, removed 1 lines" in rendered
+    assert "-old" in rendered
+    assert "+new" in rendered

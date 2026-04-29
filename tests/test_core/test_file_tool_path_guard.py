@@ -8,7 +8,8 @@ from tools.files.glob import GlobTool
 from tools.files.grep import GrepTool
 from tools.files.ls import LsTool
 from tools.files.write_file import WriteFileTool
-from tools.workspace_paths import ensure_within_workspace, resolve_workspace_path
+from tools.files.read_file import ReadFileTool
+from tools.workspace_paths import display_path, ensure_within_workspace, resolve_workspace_path
 
 
 def test_resolve_workspace_path_allows_relative_child(tmp_path):
@@ -117,3 +118,62 @@ def test_grep_blocks_absolute_outside_workspace(tmp_path):
 
     with pytest.raises(ToolException, match="workspace|工作区|越界"):
         tool._run(pattern="secret", path=str(outside))
+
+
+# ── display_path normalization ──
+
+
+def test_display_path_returns_relative_for_workspace_child(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    child = workspace / "src" / "app.py"
+    child.parent.mkdir()
+
+    assert display_path(workspace, child) == "src/app.py"
+
+
+def test_display_path_returns_absolute_for_outside(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    outside = tmp_path / "other" / "secret.txt"
+    outside.parent.mkdir()
+
+    assert display_path(workspace, outside) == str(outside.resolve())
+
+
+def test_read_file_display_uses_relative_path(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    target = workspace / "src" / "main.py"
+    target.parent.mkdir()
+    target.write_text("print('hi')\n")
+    tool = ReadFileTool(workspace=workspace)
+
+    _, artifact = tool._run(file_path=str(target))
+
+    assert artifact["display"].startswith("src/main.py")
+    assert artifact["toolUseResult"]["input"]["file_path"] == "src/main.py"
+    assert artifact["toolUseResult"]["file"]["filePath"] == "src/main.py"
+
+
+def test_write_file_display_uses_relative_path(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    tool = WriteFileTool(workspace=workspace)
+
+    _, artifact = tool._run(file_path=str(workspace / "out" / "log.txt"), content="hello\n")
+
+    assert artifact["display"].startswith("out/log.txt")
+
+
+def test_edit_file_display_uses_relative_path(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    target = workspace / "lib" / "util.py"
+    target.parent.mkdir()
+    target.write_text("old\n")
+    tool = EditFileTool(workspace=workspace)
+
+    _, artifact = tool._run(file_path=str(target), old_string="old", new_string="new")
+
+    assert artifact["display"].startswith("lib/util.py")

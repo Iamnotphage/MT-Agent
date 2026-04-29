@@ -10,7 +10,7 @@ from langchain_core.tools.base import ToolException
 from pydantic import BaseModel, Field, PrivateAttr
 
 from tools.base import BaseTool, ToolRiskLevel
-from tools.workspace_paths import resolve_workspace_path
+from tools.workspace_paths import display_path, resolve_workspace_path
 
 MAX_LINES = 500
 MAX_CHARS = 50_000
@@ -53,6 +53,7 @@ class ReadFileTool(BaseTool):
         limit: int | None = None,
     ) -> tuple[str, dict]:
         resolved = resolve_workspace_path(self.workspace, file_path)
+        display = display_path(self.workspace, resolved)
 
         if not resolved.is_file():
             raise ToolException(f"文件不存在: {file_path}")
@@ -77,16 +78,16 @@ class ReadFileTool(BaseTool):
             return (
                 "File unchanged since last read for the same range.",
                 {
-                    "display": f"{file_path} unchanged",
+                    "display": f"{display} unchanged",
                     "toolUseResult": {
                         "type": "file_unchanged",
                         "input": {
-                            "file_path": file_path,
+                            "file_path": display,
                             "offset": start_line,
                             "limit": requested_limit,
                         },
                         "file": {
-                            "filePath": file_path,
+                            "filePath": display,
                             "startLine": start_line,
                             "numLines": len(selected),
                             "totalLines": total,
@@ -133,12 +134,12 @@ class ReadFileTool(BaseTool):
         tool_use_result = {
             "type": "text",
             "input": {
-                "file_path": file_path,
+                "file_path": display,
                 "offset": shown_lo,
                 "limit": requested_limit,
             },
             "file": {
-                "filePath": file_path,
+                "filePath": display,
                 "content": raw_content,
                 "startLine": shown_lo,
                 "numLines": len(selected),
@@ -153,7 +154,7 @@ class ReadFileTool(BaseTool):
         return (
             llm_content,
             {
-                "display": f"{file_path} ({len(selected)} lines)",
+                "display": f"{display} ({len(selected)} lines)",
                 "total_lines": total,
                 "truncated": truncated,
                 "toolUseResult": tool_use_result,

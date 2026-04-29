@@ -59,6 +59,7 @@ class Repl:
             console=console,
             event_bus=runtime.event_bus,
             session=runtime.session,
+            workspace=self._working_dir,
         )
 
     # ── 主循环 ───────────────────────────────────────────────────
@@ -149,7 +150,7 @@ class Repl:
         return requests
 
     def _prompt_approval(self, requests: list[dict]) -> dict[str, bool]:
-        self._stream.end_stream()
+        self._stream.pause_for_prompt()
 
         if not requests:
             return {}
