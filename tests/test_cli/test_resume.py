@@ -347,3 +347,40 @@ def test_cmd_resume_emits_info_logs(monkeypatch, tmp_path, caplog):
     assert "resume: loading checkpoint thread_id=thread-restore" in text
     assert "resume_from: bound session file=" in text
     assert "resume: completed thread_id=thread-restore" in text
+
+
+def test_cmd_resume_restores_full_compact_summary(monkeypatch, tmp_path):
+    recorder, _ = _make_recorder(tmp_path)
+    recorder.record({
+        "type": "compact_boundary",
+        "reason": "threshold_exceeded",
+        "pre_tokens": 100,
+        "post_tokens": 20,
+    })
+    recorder.record({
+        "type": "transcript_message",
+        "role": "system",
+        "content": "<conversation_history_summary>\nsummary\n</conversation_history_summary>",
+        "name": "compact_summary",
+    })
+    recorder.record({"type": "transcript_message", "role": "user", "content": "continue"})
+    filepath = recorder.flush()
+
+    messages = recorder.build_resume_messages(filepath)
+    assert messages[0].content.startswith("<compact_boundary ")
+    assert "conversation_history_summary" in messages[1].content
+    assert messages[2].content == "continue"
+
+    graph = _FakeGraph(SimpleNamespace(
+        values={"messages": messages},
+        next=(),
+        tasks=(),
+    ))
+
+    monkeypatch.setattr(resume_mod, "_session_picker", lambda sessions: sessions[0])
+    monkeypatch.setattr(resume_mod, "_render_resumed_history", lambda console, records: None)
+
+    console = Console(record=True, width=100)
+    thread_id = resume_mod.cmd_resume(console, recorder, graph)
+
+    assert thread_id == "thread-restore"

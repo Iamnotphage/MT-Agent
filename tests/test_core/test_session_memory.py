@@ -146,3 +146,13 @@ def test_build_session_memory_summary_message():
     message = build_session_memory_summary_message("body", summary_path="session-memory/summary.md")
     assert is_session_memory_summary_message(message) is True
     assert 'path="session-memory/summary.md"' in message.content
+
+
+def test_should_extract_memory_after_prior_completion_returns_false():
+    """第一次提取完成后，紧随的第二次请求应返回 False。"""
+    assert should_extract_memory(
+        current_tokens=91983,
+        tokens_at_last_extraction=91869,
+        tool_calls_since_last_update=58,
+        last_turn_has_tool_calls=False,
+    ) is False

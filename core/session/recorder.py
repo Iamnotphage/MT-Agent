@@ -68,6 +68,13 @@ def format_file_size(size_bytes: int) -> str:
     return f"{size_bytes / (1024 * 1024):.1f}MB"
 
 
+def _is_compact_summary_transcript_record(record: dict[str, Any]) -> bool:
+    if not is_transcript_message_record(record):
+        return False
+    content = str(record.get("content", "") or "")
+    return content.startswith("<conversation_history_summary>")
+
+
 def _build_session_memory_summary_message(summary_text: str, *, summary_path: str) -> HumanMessage:
     return HumanMessage(
         content=(
@@ -255,7 +262,20 @@ class SessionRecorder:
 
         start_idx = last_boundary_idx + 1 if last_boundary_idx >= 0 else 0
         tail_records = records[start_idx:]
-        transcript_records = [r for r in tail_records if is_transcript_message_record(r)]
+
+        # For non-session-memory full compact, restore summary from persisted transcript
+        full_compact_summary_idx = -1
+        if boundary_record and str(boundary_record.get("reason", "")) != "session_memory":
+            for idx, r in enumerate(tail_records):
+                if _is_compact_summary_transcript_record(r):
+                    resumed.append(HumanMessage(content=str(r.get("content", ""))))
+                    full_compact_summary_idx = idx
+                    break
+
+        transcript_records = [
+            r for i, r in enumerate(tail_records)
+            if is_transcript_message_record(r) and i != full_compact_summary_idx
+        ]
         resumed.extend(self._build_messages_from_transcript(transcript_records))
         logger.info(
             "build_resume_messages: filepath=%s start_idx=%d transcript_records=%d resumed_messages=%d",

@@ -793,6 +793,15 @@ def _maybe_auto_compact(
         },
         turn=turn,
     ))
+    event_bus.emit(AgentEvent(
+        type=EventType.TRANSCRIPT_MESSAGE,
+        data={
+            "role": "system",
+            "content": str(result.summary_message.content),
+            "name": "compact_summary",
+        },
+        turn=turn,
+    ))
 
     logger.info(
         "Compression complete: removed=%d kept=%d",
@@ -873,13 +882,31 @@ def _maybe_schedule_session_memory_extract(
     current_status = _session_memory_status_from_sources(session_memory_manager, state)
     history = list(state.get("messages", [])) + [ai_message]
     current_tokens = estimate_message_tokens(history)
-    tokens_at_last_extraction = current_status.tokens_at_last_extraction
     tool_calls_since_update = current_status.tool_calls_since_last_update + len(pending_tool_calls)
     last_turn_has_tool_calls = bool(pending_tool_calls)
 
+    if session_memory_worker is not None:
+        logger.info(
+            "Session memory extract candidate queued: turn=%d current_tokens=%d tool_calls_since_last_update=%d last_turn_has_tool_calls=%s",
+            turn,
+            current_tokens,
+            tool_calls_since_update,
+            last_turn_has_tool_calls,
+        )
+        session_memory_worker.schedule_extract(
+            messages=history,
+            current_tokens=current_tokens,
+            tool_calls_since_last_update=tool_calls_since_update,
+            last_turn_has_tool_calls=last_turn_has_tool_calls,
+            turn=turn,
+        )
+        current_status.tool_calls_since_last_update = tool_calls_since_update
+        session_memory_manager.set_status(current_status)
+        return _session_memory_state_payload(current_status)
+
     if not should_extract_memory(
         current_tokens=current_tokens,
-        tokens_at_last_extraction=tokens_at_last_extraction,
+        tokens_at_last_extraction=current_status.tokens_at_last_extraction,
         tool_calls_since_last_update=tool_calls_since_update,
         last_turn_has_tool_calls=last_turn_has_tool_calls,
     ):
@@ -887,26 +914,9 @@ def _maybe_schedule_session_memory_extract(
             "Session memory extract skipped: turn=%d current_tokens=%d tokens_at_last_extraction=%d tool_calls_since_last_update=%d last_turn_has_tool_calls=%s",
             turn,
             current_tokens,
-            tokens_at_last_extraction,
+            current_status.tokens_at_last_extraction,
             tool_calls_since_update,
             last_turn_has_tool_calls,
-        )
-        current_status.tool_calls_since_last_update = tool_calls_since_update
-        session_memory_manager.set_status(current_status)
-        return _session_memory_state_payload(current_status)
-
-    if session_memory_worker is not None:
-        logger.info(
-            "Session memory extract requested: turn=%d current_tokens=%d tool_calls_since_last_update=%d",
-            turn,
-            current_tokens,
-            tool_calls_since_update,
-        )
-        session_memory_worker.schedule_extract(
-            messages=history,
-            current_tokens=current_tokens,
-            tool_calls_since_last_update=tool_calls_since_update,
-            turn=turn,
         )
         current_status.tool_calls_since_last_update = tool_calls_since_update
         session_memory_manager.set_status(current_status)

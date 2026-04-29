@@ -607,6 +607,45 @@ class TestSessionListAndLoad:
         assert messages[0].content.startswith("<compact_boundary ")
         assert messages[1].content == "C"
 
+    def test_build_resume_messages_restores_full_compact_summary_from_transcript(self, recorder):
+        """full compact 后 resume 应从 transcript 恢复 summary。"""
+        recorder.record({"type": "transcript_message", "role": "user", "content": "A"})
+        recorder.record({"type": "compact_boundary", "reason": "threshold_exceeded", "pre_tokens": 100, "post_tokens": 20})
+        recorder.record({
+            "type": "transcript_message",
+            "role": "system",
+            "content": "<conversation_history_summary>\nsummary text\n</conversation_history_summary>",
+            "name": "compact_summary",
+        })
+        recorder.record({"type": "transcript_message", "role": "user", "content": "B"})
+        filepath = recorder.flush()
+
+        messages = recorder.build_resume_messages(filepath)
+
+        assert len(messages) == 3
+        assert messages[0].content.startswith("<compact_boundary ")
+        assert "conversation_history_summary" in messages[1].content
+        assert "summary text" in messages[1].content
+        assert messages[2].content == "B"
+
+    def test_build_resume_messages_full_compact_no_double_inject(self, recorder):
+        """full compact summary 不应被重复注入。"""
+        recorder.record({"type": "compact_boundary", "reason": "auto", "pre_tokens": 200, "post_tokens": 30})
+        recorder.record({
+            "type": "transcript_message",
+            "role": "system",
+            "content": "<conversation_history_summary>\nS1\n</conversation_history_summary>",
+            "name": "compact_summary",
+        })
+        recorder.record({"type": "transcript_message", "role": "user", "content": "continue"})
+        filepath = recorder.flush()
+
+        messages = recorder.build_resume_messages(filepath)
+
+        assert len(messages) == 3
+        summary_count = sum(1 for m in messages if "conversation_history_summary" in m.content)
+        assert summary_count == 1
+
     def test_build_resume_messages_prefers_canonical_transcript(self, recorder):
         """若存在 canonical transcript，应恢复 assistant tool_calls 和 ToolMessage。"""
         recorder.record({

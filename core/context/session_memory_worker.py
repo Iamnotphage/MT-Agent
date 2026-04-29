@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
     from core.context.session_memory import SessionMemoryManager, SessionMemoryStatus
 
+from core.context.session_memory import should_extract_memory
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,6 +24,7 @@ class SessionMemoryExtractRequest:
     messages: list[BaseMessage]
     current_tokens: int
     tool_calls_since_last_update: int
+    last_turn_has_tool_calls: bool
     turn: int
 
 
@@ -40,12 +43,14 @@ class SessionMemoryExtractWorker:
         messages: list[BaseMessage],
         current_tokens: int,
         tool_calls_since_last_update: int,
+        last_turn_has_tool_calls: bool = False,
         turn: int,
     ) -> bool:
         request = SessionMemoryExtractRequest(
             messages=list(messages),
             current_tokens=current_tokens,
             tool_calls_since_last_update=tool_calls_since_last_update,
+            last_turn_has_tool_calls=last_turn_has_tool_calls,
             turn=turn,
         )
         with self._lock:
@@ -93,6 +98,23 @@ class SessionMemoryExtractWorker:
 
     def _run_request(self, request: SessionMemoryExtractRequest) -> None:
         try:
+            status = self._manager.get_status()
+            if not should_extract_memory(
+                current_tokens=request.current_tokens,
+                tokens_at_last_extraction=status.tokens_at_last_extraction,
+                tool_calls_since_last_update=max(
+                    status.tool_calls_since_last_update,
+                    request.tool_calls_since_last_update,
+                ),
+                last_turn_has_tool_calls=request.last_turn_has_tool_calls,
+            ):
+                logger.info(
+                    "Session memory extract skipped at execution time: turn=%d current_tokens=%d tokens_at_last_extraction=%d",
+                    request.turn,
+                    request.current_tokens,
+                    status.tokens_at_last_extraction,
+                )
+                return
             logger.info(
                 "Session memory extract started: turn=%d message_count=%d current_tokens=%d",
                 request.turn,
