@@ -440,7 +440,7 @@ class TestEnsureGlobalSetup:
 class TestSaveMemoryTool:
     def test_save_via_tool(self, cm, mm, config):
         """通过 SaveMemoryTool 保存记忆。"""
-        from tools.agent_ops.memory import SaveMemoryTool
+        from tools.agent.memory import SaveMemoryTool
 
         (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
@@ -454,7 +454,7 @@ class TestSaveMemoryTool:
     def test_empty_fact_rejected(self):
         """空 fact 被拒绝。"""
         from langchain_core.tools.base import ToolException
-        from tools.agent_ops.memory import SaveMemoryTool
+        from tools.agent.memory import SaveMemoryTool
 
         tool = SaveMemoryTool(save_fn=lambda f: None)
         with pytest.raises(ToolException, match="不能为空"):
@@ -462,7 +462,7 @@ class TestSaveMemoryTool:
 
     def test_invoke_via_langchain(self):
         """langchain invoke 接口可用"""
-        from tools.agent_ops.memory import SaveMemoryTool
+        from tools.agent.memory import SaveMemoryTool
 
         tool = SaveMemoryTool(save_fn=lambda f: None)
         result = tool.invoke({"fact": "test fact"})

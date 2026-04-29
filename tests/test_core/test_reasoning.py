@@ -146,7 +146,7 @@ class TestReasoningNode:
         """传入 tools 时调用 bind_tools"""
         llm = MagicMock()
         llm.bind_tools.return_value = llm
-        from tools.file_ops.read_file import ReadFileTool
+        from tools.files.read_file import ReadFileTool
         tool_list = [ReadFileTool(workspace="/tmp")]
 
         create_reasoning_node(llm, event_bus, tools=tool_list)

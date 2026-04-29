@@ -3,7 +3,7 @@ import pytest
 from langchain_core.tools.base import ToolException
 
 from tools.base import BaseTool, ToolRiskLevel
-from tools.file_ops.read_file import ReadFileTool
+from tools.files.read_file import ReadFileTool
 
 
 # ── ReadFileTool ─────────────────────────────────────────────────
@@ -75,3 +75,20 @@ class TestReadFileTool:
 
     def test_risk_level(self, tool):
         assert tool.risk_level == ToolRiskLevel.LOW
+
+    def test_absolute_path_outside_workspace_blocked(self, tool, tmp_path):
+        outside = tmp_path.parent / "outside_workspace.txt"
+        outside.write_text("secret\n")
+
+        with pytest.raises(ToolException, match="越界"):
+            tool._run(file_path=str(outside))
+
+    def test_sibling_prefix_path_blocked(self, workspace):
+        sibling = workspace.parent / f"{workspace.name}2"
+        sibling.mkdir()
+        victim = sibling / "secret.txt"
+        victim.write_text("secret\n")
+        tool = ReadFileTool(workspace=workspace)
+
+        with pytest.raises(ToolException, match="越界"):
+            tool._run(file_path=str(victim))

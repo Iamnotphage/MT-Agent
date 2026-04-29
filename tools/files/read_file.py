@@ -10,6 +10,7 @@ from langchain_core.tools.base import ToolException
 from pydantic import BaseModel, Field, PrivateAttr
 
 from tools.base import BaseTool, ToolRiskLevel
+from tools.workspace_paths import resolve_workspace_path
 
 MAX_LINES = 500
 MAX_CHARS = 50_000
@@ -51,10 +52,7 @@ class ReadFileTool(BaseTool):
         offset: int | None = None,
         limit: int | None = None,
     ) -> tuple[str, dict]:
-        resolved = (self.workspace / file_path).resolve()
-
-        if not str(resolved).startswith(str(self.workspace)):
-            raise ToolException(f"路径越界: {file_path} 不在工作区内")
+        resolved = resolve_workspace_path(self.workspace, file_path)
 
         if not resolved.is_file():
             raise ToolException(f"文件不存在: {file_path}")

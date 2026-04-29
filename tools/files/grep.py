@@ -11,6 +11,7 @@ from langchain_core.tools.base import ToolException
 from pydantic import BaseModel, Field
 
 from tools.base import BaseTool, ToolRiskLevel
+from tools.workspace_paths import resolve_workspace_path
 
 _ALWAYS_IGNORE = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
@@ -59,11 +60,7 @@ class GrepTool(BaseTool):
         except re.error as e:
             raise ToolException(f"Invalid regex pattern: {e}")
 
-        search_dir = self.workspace / (path or ".")
-        resolved = search_dir.resolve()
-
-        if not str(resolved).startswith(str(self.workspace)):
-            raise ToolException(f"Path out of bounds: {path} is not within workspace")
+        resolved = resolve_workspace_path(self.workspace, path or ".")
 
         if not resolved.exists():
             raise ToolException(f"Directory does not exist: {path}")

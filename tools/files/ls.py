@@ -11,6 +11,7 @@ from langchain_core.tools.base import ToolException
 from pydantic import BaseModel, Field
 
 from tools.base import BaseTool, ToolRiskLevel
+from tools.workspace_paths import resolve_workspace_path
 
 _ALWAYS_IGNORE = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
@@ -51,10 +52,7 @@ class LsTool(BaseTool):
         dir_path: str = ".",
         ignore: list[str] | None = None,
     ) -> tuple[str, dict]:
-        resolved = (self.workspace / dir_path).resolve()
-
-        if not str(resolved).startswith(str(self.workspace)):
-            raise ToolException(f"Path out of bounds: {dir_path} is not within workspace")
+        resolved = resolve_workspace_path(self.workspace, dir_path)
 
         if not resolved.exists():
             raise ToolException(f"Directory does not exist: {dir_path}")

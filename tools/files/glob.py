@@ -10,6 +10,7 @@ from langchain_core.tools.base import ToolException
 from pydantic import BaseModel, Field
 
 from tools.base import BaseTool, ToolRiskLevel
+from tools.workspace_paths import ensure_within_workspace, resolve_workspace_path
 
 _ALWAYS_IGNORE = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
@@ -58,11 +59,7 @@ class GlobTool(BaseTool):
         case_sensitive: bool = False,
         respect_git_ignore: bool = True,
     ) -> tuple[str, dict]:
-        search_dir = self.workspace / (path or ".")
-        resolved = search_dir.resolve()
-
-        if not str(resolved).startswith(str(self.workspace)):
-            raise ToolException(f"Path out of bounds: {path} is not within workspace")
+        resolved = resolve_workspace_path(self.workspace, path or ".")
 
         if not resolved.exists():
             raise ToolException(f"Directory does not exist: {path}")
@@ -77,7 +74,9 @@ class GlobTool(BaseTool):
 
         filtered = []
         for match in matches:
-            if not str(match).startswith(str(self.workspace)):
+            try:
+                ensure_within_workspace(self.workspace, match)
+            except ToolException:
                 continue
 
             parts = match.relative_to(self.workspace).parts

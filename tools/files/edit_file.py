@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from core.utils.diff import generate_diff
 from tools.base import BaseTool, ToolRiskLevel
+from tools.workspace_paths import resolve_workspace_path
 
 
 class EditFileArgs(BaseModel):
@@ -46,10 +47,7 @@ class EditFileTool(BaseTool):
         new_string: str,
         allow_multiple: bool = False,
     ) -> tuple[str, dict]:
-        resolved = (self.workspace / file_path).resolve()
-
-        if not str(resolved).startswith(str(self.workspace)):
-            raise ToolException(f"Path out of bounds: {file_path} is not within workspace")
+        resolved = resolve_workspace_path(self.workspace, file_path)
 
         if resolved.exists() and resolved.is_dir():
             raise ToolException(f"Target is a directory, not a file: {file_path}")
