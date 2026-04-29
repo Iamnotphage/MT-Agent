@@ -168,6 +168,7 @@ def create_reasoning_node(
             content=collected.content or "",
             tool_calls=collected.tool_calls or [],
             additional_kwargs={"reasoning_content": reasoning_content} if "reasoning_content" in collected_additional else {},
+            response_metadata={"timestamp_ms": int(time.time() * 1000)},
         )
         event_bus.emit(AgentEvent(
             type=EventType.TRANSCRIPT_MESSAGE,

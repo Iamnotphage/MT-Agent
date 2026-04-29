@@ -311,10 +311,15 @@ class SessionRecorder:
                 reasoning_content = record.get("reasoning_content")
                 if reasoning_content is not None:
                     additional_kwargs["reasoning_content"] = reasoning_content
+                response_metadata: dict[str, Any] = {}
+                record_ts = record.get("timestamp")
+                if record_ts:
+                    response_metadata["timestamp_ms"] = int(record_ts)
                 messages.append(AIMessage(
                     content=content,
                     tool_calls=record.get("tool_calls") or [],
                     additional_kwargs=additional_kwargs,
+                    response_metadata=response_metadata,
                 ))
             elif role == "tool":
                 kwargs: dict[str, Any] = {

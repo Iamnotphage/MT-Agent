@@ -720,3 +720,14 @@ class TestTimeBasedMicrocompact:
             and e.data.get("role") == "tool"
             for e in seen
         )
+
+    def test_reasoning_emits_aimessage_with_timestamp(self, event_bus, mock_llm_text):
+        node = create_reasoning_node(mock_llm_text, event_bus)
+        state = {"messages": [HumanMessage(content="hi")], "turn_count": 0}
+
+        result = node(state)
+
+        ai_msg = result["messages"][0]
+        ts = getattr(ai_msg, "response_metadata", {}).get("timestamp_ms")
+        assert isinstance(ts, int)
+        assert ts > 0
