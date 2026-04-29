@@ -15,6 +15,7 @@ from config import load_llm_config
 from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.context.compressor import ContextCompressor
 from core.context.session_memory import SessionMemoryManager
+from core.context.session_memory_worker import SessionMemoryExtractWorker
 from core.context import ContextManager
 from core.memory import MemoryManager
 from core.session import SessionRecorder
@@ -96,6 +97,7 @@ def create_agent_runtime(
         session_id=session.stats.session_id,
         llm=compressor_llm,
     )
+    session_memory_worker = SessionMemoryExtractWorker(session_memory_manager, event_bus)
 
     checkpoint_path = session.get_checkpoint_path()
     checkpoint_manager = SqliteSaver.from_conn_string(str(checkpoint_path))
@@ -111,6 +113,7 @@ def create_agent_runtime(
         session_stats=session.stats,
         compressor=compressor,
         session_memory_manager=session_memory_manager,
+        session_memory_worker=session_memory_worker,
     )
 
     return AgentRuntime(

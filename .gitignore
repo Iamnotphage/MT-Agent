@@ -5,6 +5,9 @@ output/reports/*
 .devkit
 .venv/
 .pytest_cache/
+logs/
+.claude/
+.uv-cache/
 
 # 配置文件
 .env

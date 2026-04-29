@@ -7,7 +7,6 @@ from core.session.recorder import (
 )
 from core.session.schema import (
     RECORD_COMPACT_BOUNDARY,
-    RECORD_COMPRESSION,
     RECORD_SESSION_END,
     RECORD_SESSION_MEMORY_UPDATE,
     RECORD_SESSION_START,
@@ -18,7 +17,6 @@ from core.session.stats import SessionStats
 
 __all__ = [
     "RECORD_COMPACT_BOUNDARY",
-    "RECORD_COMPRESSION",
     "RECORD_SESSION_END",
     "RECORD_SESSION_MEMORY_UPDATE",
     "RECORD_SESSION_START",

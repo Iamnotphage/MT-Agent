@@ -20,11 +20,12 @@ from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.context.auto_compact import AutoCompactDecision, AutoCompactPolicy, QuerySource
 from core.context.budget import budget_snapshot, estimate_message_tokens
 from core.context.session_memory import (
-    SessionMemoryManager,
     SessionMemoryStatus,
     is_session_memory_summary_message,
     should_extract_memory,
 )
+from core.context.session_memory import SessionMemoryManager
+from core.context.session_memory_worker import SessionMemoryExtractWorker
 from core.event_bus import AgentEvent, EventBus, EventType
 from core.context.message_invariants import (
     is_compact_boundary_message,
@@ -56,6 +57,7 @@ def create_reasoning_node(
     compressor: ContextCompressor | None = None,
     auto_compact_policy: AutoCompactPolicy | None = None,
     session_memory_manager: SessionMemoryManager | None = None,
+    session_memory_worker: SessionMemoryExtractWorker | None = None,
 ) -> Callable[[AgentState], dict]:
     """
     创建 reasoning 节点函数
@@ -199,8 +201,9 @@ def create_reasoning_node(
                 existing_fallbacks.append({"tool_call_ids": tool_call_ids, "reasoning_content": reasoning_content})
                 result["assistant_reasoning_fallbacks"] = existing_fallbacks
 
-        session_memory_updates = _maybe_update_session_memory(
+        session_memory_updates = _maybe_schedule_session_memory_extract(
             session_memory_manager=session_memory_manager,
+            session_memory_worker=session_memory_worker,
             event_bus=event_bus,
             state=state,
             ai_message=ai_message,
@@ -688,13 +691,7 @@ def _maybe_auto_compact(
     pre_tokens = session_stats.last_input_tokens
 
     if session_memory_manager is not None:
-        session_memory_status = SessionMemoryStatus(
-            summary_path=state.get("session_memory_summary_path"),
-            last_summarized_message_id=state.get("session_memory_last_summarized_message_id"),
-            tokens_at_last_extraction=state.get("session_memory_tokens_at_last_extraction", 0),
-            tool_calls_since_last_update=state.get("session_memory_tool_calls_since_update", 0),
-            last_update_turn=state.get("session_memory_last_update_turn", 0),
-        )
+        session_memory_status = _session_memory_status_from_sources(session_memory_manager, state)
         session_memory_result = session_memory_manager.try_session_memory_compact(
             messages=history,
             status=session_memory_status,
@@ -703,6 +700,13 @@ def _maybe_auto_compact(
             max_keep_tokens=CONTEXT_CONFIG["compression_preserve_max_tokens"],
         )
         if session_memory_result is not None:
+            logger.info(
+                "Session memory compact applied: turn=%d start_index=%d post_tokens=%d threshold=%d",
+                turn,
+                session_memory_result.start_index,
+                session_memory_result.post_tokens,
+                session_stats.last_auto_compact_threshold,
+            )
             session_stats.compression_failure_count = 0
             event_bus.emit(AgentEvent(
                 type=EventType.CONTEXT_COMPRESSED,
@@ -729,6 +733,11 @@ def _maybe_auto_compact(
                 session_memory_result,
                 history,
             )
+        logger.info(
+            "Session memory compact unavailable, falling back to full compact: turn=%d threshold=%d",
+            turn,
+            session_stats.last_auto_compact_threshold,
+        )
 
     try:
         result = compressor.compress(history, reason=str(decision.trigger_reason or "auto"))
@@ -815,9 +824,41 @@ def _session_memory_result_to_compress_result(
     )
 
 
-def _maybe_update_session_memory(
+def _session_memory_status_from_sources(
+    session_memory_manager: SessionMemoryManager,
+    state: AgentState,
+) -> SessionMemoryStatus:
+    manager_status = session_memory_manager.get_status()
+    state_status = SessionMemoryStatus(
+        summary_path=state.get("session_memory_summary_path"),
+        last_summarized_message_id=state.get("session_memory_last_summarized_message_id"),
+        tokens_at_last_extraction=state.get("session_memory_tokens_at_last_extraction", 0),
+        tool_calls_since_last_update=state.get("session_memory_tool_calls_since_update", 0),
+        last_update_turn=state.get("session_memory_last_update_turn", 0),
+    )
+    return SessionMemoryStatus(
+        summary_path=manager_status.summary_path or state_status.summary_path,
+        last_summarized_message_id=manager_status.last_summarized_message_id or state_status.last_summarized_message_id,
+        tokens_at_last_extraction=manager_status.tokens_at_last_extraction or state_status.tokens_at_last_extraction,
+        tool_calls_since_last_update=max(manager_status.tool_calls_since_last_update, state_status.tool_calls_since_last_update),
+        last_update_turn=max(manager_status.last_update_turn, state_status.last_update_turn),
+    )
+
+
+def _session_memory_state_payload(status: SessionMemoryStatus) -> dict[str, Any]:
+    return {
+        "session_memory_summary_path": status.summary_path,
+        "session_memory_last_summarized_message_id": status.last_summarized_message_id,
+        "session_memory_tokens_at_last_extraction": status.tokens_at_last_extraction,
+        "session_memory_tool_calls_since_update": status.tool_calls_since_last_update,
+        "session_memory_last_update_turn": status.last_update_turn,
+    }
+
+
+def _maybe_schedule_session_memory_extract(
     *,
     session_memory_manager: SessionMemoryManager | None,
+    session_memory_worker: SessionMemoryExtractWorker | None,
     event_bus: EventBus,
     state: AgentState,
     ai_message: AIMessage,
@@ -829,10 +870,11 @@ def _maybe_update_session_memory(
             "session_memory_tool_calls_since_update": state.get("session_memory_tool_calls_since_update", 0) + len(pending_tool_calls),
         }
 
+    current_status = _session_memory_status_from_sources(session_memory_manager, state)
     history = list(state.get("messages", [])) + [ai_message]
     current_tokens = estimate_message_tokens(history)
-    tokens_at_last_extraction = state.get("session_memory_tokens_at_last_extraction", 0)
-    tool_calls_since_update = state.get("session_memory_tool_calls_since_update", 0) + len(pending_tool_calls)
+    tokens_at_last_extraction = current_status.tokens_at_last_extraction
+    tool_calls_since_update = current_status.tool_calls_since_last_update + len(pending_tool_calls)
     last_turn_has_tool_calls = bool(pending_tool_calls)
 
     if not should_extract_memory(
@@ -841,34 +883,41 @@ def _maybe_update_session_memory(
         tool_calls_since_last_update=tool_calls_since_update,
         last_turn_has_tool_calls=last_turn_has_tool_calls,
     ):
-        return {
-            "session_memory_tool_calls_since_update": tool_calls_since_update,
-        }
+        logger.info(
+            "Session memory extract skipped: turn=%d current_tokens=%d tokens_at_last_extraction=%d tool_calls_since_last_update=%d last_turn_has_tool_calls=%s",
+            turn,
+            current_tokens,
+            tokens_at_last_extraction,
+            tool_calls_since_update,
+            last_turn_has_tool_calls,
+        )
+        current_status.tool_calls_since_last_update = tool_calls_since_update
+        session_memory_manager.set_status(current_status)
+        return _session_memory_state_payload(current_status)
 
-    update_result = session_memory_manager.update_session_memory(
-        messages=history,
-        current_tokens=current_tokens,
-        tool_calls_since_last_update=tool_calls_since_update,
-        turn=turn,
+    if session_memory_worker is not None:
+        logger.info(
+            "Session memory extract requested: turn=%d current_tokens=%d tool_calls_since_last_update=%d",
+            turn,
+            current_tokens,
+            tool_calls_since_update,
+        )
+        session_memory_worker.schedule_extract(
+            messages=history,
+            current_tokens=current_tokens,
+            tool_calls_since_last_update=tool_calls_since_update,
+            turn=turn,
+        )
+        current_status.tool_calls_since_last_update = tool_calls_since_update
+        session_memory_manager.set_status(current_status)
+        return _session_memory_state_payload(current_status)
+
+    logger.info(
+        "Session memory extract requested but no worker configured: turn=%d current_tokens=%d",
+        turn,
+        current_tokens,
     )
-    event_bus.emit(AgentEvent(
-        type=EventType.SESSION_MEMORY_UPDATED,
-        data={
-            "summary_path": update_result.summary_path,
-            "last_summarized_message_id": update_result.last_summarized_message_id,
-            "tokens_at_last_extraction": update_result.tokens_at_last_extraction,
-            "tool_calls_since_last_update": update_result.tool_calls_since_last_update,
-            "turn": update_result.last_update_turn,
-        },
-        turn=turn,
-    ))
-    return {
-        "session_memory_summary_path": update_result.summary_path,
-        "session_memory_last_summarized_message_id": update_result.last_summarized_message_id,
-        "session_memory_tokens_at_last_extraction": update_result.tokens_at_last_extraction,
-        "session_memory_tool_calls_since_update": update_result.tool_calls_since_last_update,
-        "session_memory_last_update_turn": update_result.last_update_turn,
-    }
+    return _session_memory_state_payload(current_status)
 
 
 def _build_compression_message_ops(result: CompressResult) -> list:

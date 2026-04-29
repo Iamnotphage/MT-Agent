@@ -22,7 +22,6 @@ from core.session.artifacts import (
 )
 from core.session.schema import (
     RECORD_COMPACT_BOUNDARY,
-    RECORD_COMPRESSION,
     RECORD_SESSION_END,
     RECORD_SESSION_MEMORY_UPDATE,
     RECORD_SESSION_START,
@@ -102,6 +101,23 @@ class SessionRecorder:
     def set_thread_id(self, thread_id: str) -> None:
         """更新当前活跃的 LangGraph thread_id。"""
         self._thread_id = thread_id
+
+    def resume_from(self, filepath: Path) -> None:
+        """绑定被恢复的 session 文件，并沿用其 session_id/thread_id。"""
+        self._resumed_from = filepath
+        session_meta = self._read_session_metadata(filepath)
+        session_id = str(session_meta.get("session_id", "") or "").strip()
+        thread_id = str(session_meta.get("thread_id", "") or "").strip()
+        if session_id:
+            self.stats.session_id = session_id
+        if thread_id:
+            self._thread_id = thread_id
+        logger.info(
+            "resume_from: bound session file=%s session_id=%s thread_id=%s",
+            filepath,
+            self.stats.session_id,
+            self._thread_id,
+        )
 
     def flush(self) -> Path | None:
         """将会话记录写入磁盘 JSONL 文件。"""
@@ -199,25 +215,24 @@ class SessionRecorder:
     def build_resume_messages(self, filepath: Path) -> list[BaseMessage]:
         """从会话文件重建 resume 所需消息，只保留最后一次压缩摘要及其后的消息。"""
         records = self.load_raw_session(filepath)
+        session_meta = self._read_session_metadata(filepath)
+        source_session_id = str(session_meta.get("session_id", "") or "").strip() or self.stats.session_id
+        logger.info(
+            "build_resume_messages: filepath=%s record_count=%d source_session_id=%s",
+            filepath,
+            len(records),
+            source_session_id,
+        )
 
-        last_compression_idx = -1
-        summary_text = ""
-        compression_trigger_reason = "auto"
         boundary_record: dict[str, Any] | None = None
         last_boundary_idx = -1
         session_memory_record: dict[str, Any] | None = None
-        last_session_memory_idx = -1
         for idx, record in enumerate(records):
             rtype = get_record_type(record)
-            if rtype == RECORD_COMPRESSION:
-                last_compression_idx = idx
-                summary_text = str(record.get("summary", "")).strip()
-                compression_trigger_reason = str(record.get("trigger_reason", "auto") or "auto")
-            elif rtype == RECORD_COMPACT_BOUNDARY:
+            if rtype == RECORD_COMPACT_BOUNDARY:
                 last_boundary_idx = idx
                 boundary_record = normalize_compact_boundary_record(record)
             elif rtype == RECORD_SESSION_MEMORY_UPDATE:
-                last_session_memory_idx = idx
                 session_memory_record = normalize_session_memory_update_record(record)
 
         resumed: list[BaseMessage] = []
@@ -227,20 +242,28 @@ class SessionRecorder:
                 post_tokens=int(boundary_record.get("post_tokens", 0) or 0),
                 reason=str(boundary_record.get("reason", "auto") or "auto"),
             ))
-        if compression_trigger_reason == "session_memory" and session_memory_record:
-            session_summary_text = self._load_session_memory_summary_text(session_memory_record)
-            if session_summary_text:
-                resumed.append(_build_session_memory_summary_message(
-                    session_summary_text,
-                    summary_path=str(session_memory_record.get("summary_path", "")),
-                ))
-        elif summary_text:
-            resumed.append(ContextCompressor.build_summary_message(summary_text))
+            if str(boundary_record.get("reason", "")) == "session_memory" and session_memory_record:
+                session_summary_text = self._load_session_memory_summary_text(
+                    session_memory_record,
+                    session_id=source_session_id,
+                )
+                if session_summary_text:
+                    resumed.append(_build_session_memory_summary_message(
+                        session_summary_text,
+                        summary_path=str(session_memory_record.get("summary_path", "")),
+                    ))
 
-        start_idx = max(last_compression_idx, last_boundary_idx, last_session_memory_idx) + 1 if (last_compression_idx >= 0 or last_boundary_idx >= 0 or last_session_memory_idx >= 0) else 0
+        start_idx = last_boundary_idx + 1 if last_boundary_idx >= 0 else 0
         tail_records = records[start_idx:]
         transcript_records = [r for r in tail_records if is_transcript_message_record(r)]
         resumed.extend(self._build_messages_from_transcript(transcript_records))
+        logger.info(
+            "build_resume_messages: filepath=%s start_idx=%d transcript_records=%d resumed_messages=%d",
+            filepath,
+            start_idx,
+            len(transcript_records),
+            len(resumed),
+        )
         return resumed
 
     def estimate_messages_tokens(self, messages: list[BaseMessage]) -> int:
@@ -286,31 +309,13 @@ class SessionRecorder:
 
     @staticmethod
     def _parse_session_file(filepath: Path) -> dict[str, Any] | None:
-        session_id = ""
-        thread_id = ""
-        model = ""
-        branch = ""
-        timestamp = 0
-        records: list[dict[str, Any]] = []
-
-        for line in filepath.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            rtype = record.get("type", "")
-            if rtype == RECORD_SESSION_START:
-                session_id = record.get("sessionId", "")
-                thread_id = record.get("threadId", "")
-                model = record.get("model", "")
-                branch = record.get("branch", "")
-                timestamp = record.get("timestamp", 0)
-            else:
-                records.append(record)
+        session_meta = SessionRecorder._read_session_metadata(filepath)
+        session_id = str(session_meta.get("session_id", "") or "")
+        thread_id = str(session_meta.get("thread_id", "") or "")
+        model = str(session_meta.get("model", "") or "")
+        branch = str(session_meta.get("branch", "") or "")
+        timestamp = int(session_meta.get("timestamp", 0) or 0)
+        records = list(session_meta.get("records", []) or [])
 
         transcript_records = [normalize_transcript_record(r) for r in records if is_transcript_message_record(r)]
         first_user_msg = ""
@@ -340,6 +345,43 @@ class SessionRecorder:
             "message_count": message_count,
             "file_size": file_size,
             "filepath": filepath,
+        }
+
+    @staticmethod
+    def _read_session_metadata(filepath: Path) -> dict[str, Any]:
+        session_id = ""
+        thread_id = ""
+        model = ""
+        branch = ""
+        timestamp = 0
+        records: list[dict[str, Any]] = []
+
+        for line in filepath.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            rtype = record.get("type", "")
+            if rtype == RECORD_SESSION_START:
+                session_id = record.get("sessionId", "")
+                thread_id = record.get("threadId", "")
+                model = record.get("model", "")
+                branch = record.get("branch", "")
+                timestamp = record.get("timestamp", 0)
+            else:
+                records.append(record)
+
+        return {
+            "session_id": session_id,
+            "thread_id": thread_id,
+            "model": model,
+            "branch": branch,
+            "timestamp": timestamp,
+            "records": records,
         }
 
     def _get_history_dir(self) -> Path:
@@ -372,19 +414,36 @@ class SessionRecorder:
             self.stats.session_id,
         )
 
-    def _load_session_memory_summary_text(self, record: dict[str, Any]) -> str:
+    def _load_session_memory_summary_text(self, record: dict[str, Any], *, session_id: str) -> str:
         summary_path = str(record.get("summary_path", "") or "")
-        if not summary_path or not self.stats.session_id:
+        if not summary_path or not session_id:
+            logger.info(
+                "load_session_memory_summary: skipped summary_path=%s session_id=%s",
+                summary_path,
+                session_id,
+            )
             return ""
         path = resolve_session_relative_artifact(
             str(self._working_dir),
             self._config,
-            self.stats.session_id,
+            session_id,
             summary_path,
         )
         if not path.exists():
+            logger.info(
+                "load_session_memory_summary: missing path=%s session_id=%s",
+                path,
+                session_id,
+            )
             return ""
-        return path.read_text(encoding="utf-8").strip()
+        text = path.read_text(encoding="utf-8").strip()
+        logger.info(
+            "load_session_memory_summary: loaded path=%s chars=%d session_id=%s",
+            path,
+            len(text),
+            session_id,
+        )
+        return text
 
     def get_checkpoint_path(self) -> Path:
         """当前项目的 LangGraph checkpoint SQLite 文件路径。"""

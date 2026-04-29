@@ -7,6 +7,7 @@ from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.event_bus import EventType
 from core.context.compressor import ContextCompressor
 from core.context.session_memory import SessionMemoryCompactResult, SessionMemoryManager, build_session_memory_summary_message
+from core.context.session_memory_worker import SessionMemoryExtractWorker
 from core.session import SessionStats
 from core.nodes.reasoning import _record_token_usage, create_reasoning_node, should_use_tools
 
@@ -477,7 +478,7 @@ class TestReasoningNode:
         assert isinstance(compacted_assistant, AIMessage)
         assert compacted_assistant.additional_kwargs["reasoning_content"] == "tool-backed turn reasoning"
 
-    def test_session_memory_update_event_and_state_fields(self, event_bus, tmp_path, mock_llm_text):
+    def test_session_memory_extract_is_scheduled_and_completes_in_background(self, event_bus, tmp_path, mock_llm_text):
         received = []
         event_bus.subscribe(EventType.SESSION_MEMORY_UPDATED, lambda e: received.append(e))
         llm = MagicMock()
@@ -488,11 +489,13 @@ class TestReasoningNode:
             session_id="sid",
             llm=llm,
         )
+        worker = SessionMemoryExtractWorker(session_memory_manager, event_bus)
 
         node = create_reasoning_node(
             mock_llm_text,
             event_bus,
             session_memory_manager=session_memory_manager,
+            session_memory_worker=worker,
         )
         state = {
             "messages": [HumanMessage(content="x" * 50000, id="u1")],
@@ -502,10 +505,13 @@ class TestReasoningNode:
         }
 
         result = node(state)
+        assert worker.wait_for_idle(2.0) is True
 
         assert len(received) == 1
         assert result["session_memory_summary_path"] == "session-memory/summary.md"
-        assert result["session_memory_tokens_at_last_extraction"] > 0
+        assert result["session_memory_tokens_at_last_extraction"] == 0
+        status = session_memory_manager.get_status()
+        assert status.tokens_at_last_extraction > 0
 
     def test_auto_compact_prefers_session_memory_before_full_compact(self, event_bus, tmp_path, mock_llm_text):
         old_limit = CONTEXT_CONFIG["token_limit"]

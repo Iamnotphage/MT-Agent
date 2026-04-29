@@ -8,7 +8,6 @@ from typing import Any
 RECORD_SESSION_START = "session_start"
 RECORD_SESSION_END = "session_end"
 RECORD_TRANSCRIPT_MESSAGE = "transcript_message"
-RECORD_COMPRESSION = "compression"
 RECORD_COMPACT_BOUNDARY = "compact_boundary"
 RECORD_TOOL_RESULT_ARTIFACT = "tool_result_artifact"
 RECORD_SESSION_MEMORY_UPDATE = "session_memory_update"
@@ -87,24 +86,6 @@ def make_transcript_message_record(
         "name": name or "",
         "toolUseResult": tool_use_result,
         "artifact": artifact,
-        "timestamp": _timestamp(timestamp),
-    }
-
-
-def make_compression_record(
-    *,
-    summary: str,
-    removed_count: int = 0,
-    kept_count: int = 0,
-    trigger_reason: str = "auto",
-    timestamp: int | None = None,
-) -> dict[str, Any]:
-    return {
-        "type": RECORD_COMPRESSION,
-        "summary": summary,
-        "removed_count": removed_count,
-        "kept_count": kept_count,
-        "trigger_reason": trigger_reason,
         "timestamp": _timestamp(timestamp),
     }
 

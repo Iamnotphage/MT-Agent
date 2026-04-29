@@ -102,3 +102,15 @@ def test_normalize_session_memory_update_record():
     assert record["tokens_at_last_extraction"] == 0
     assert record["tool_calls_since_last_update"] == 0
     assert record["turn"] == 0
+
+
+def test_schema_exports_do_not_expose_compression():
+    import core.session as session_mod
+
+    assert hasattr(session_mod, "RECORD_COMPACT_BOUNDARY")
+    assert not hasattr(session_mod, "RECORD_COMPRESSION")
+
+
+def test_is_renderable_record_rejects_non_transcript_metadata():
+    assert is_renderable_record({"type": "compact_boundary"}) is False
+    assert is_renderable_record({"type": "session_memory_update"}) is False

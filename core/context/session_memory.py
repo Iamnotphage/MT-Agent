@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -110,6 +111,8 @@ class SessionMemoryManager:
         self._config = config
         self._session_id = session_id
         self._llm = llm
+        self._status = SessionMemoryStatus(summary_path=self.get_summary_relative_path())
+        self._status_lock = threading.Lock()
 
     def get_summary_path(self) -> Path:
         return get_session_memory_dir(
@@ -141,6 +144,37 @@ class SessionMemoryManager:
         path = self.ensure_summary_file()
         path.write_text(content, encoding="utf-8")
         return path
+
+    def get_status(self) -> SessionMemoryStatus:
+        with self._status_lock:
+            return SessionMemoryStatus(
+                summary_path=self._status.summary_path,
+                last_summarized_message_id=self._status.last_summarized_message_id,
+                tokens_at_last_extraction=self._status.tokens_at_last_extraction,
+                tool_calls_since_last_update=self._status.tool_calls_since_last_update,
+                last_update_turn=self._status.last_update_turn,
+            )
+
+    def set_status(self, status: SessionMemoryStatus) -> None:
+        with self._status_lock:
+            self._status = SessionMemoryStatus(
+                summary_path=status.summary_path or self.get_summary_relative_path(),
+                last_summarized_message_id=status.last_summarized_message_id,
+                tokens_at_last_extraction=status.tokens_at_last_extraction,
+                tool_calls_since_last_update=status.tool_calls_since_last_update,
+                last_update_turn=status.last_update_turn,
+            )
+
+    def apply_update_result(self, result: SessionMemoryUpdateResult) -> SessionMemoryStatus:
+        status = SessionMemoryStatus(
+            summary_path=result.summary_path,
+            last_summarized_message_id=result.last_summarized_message_id,
+            tokens_at_last_extraction=result.tokens_at_last_extraction,
+            tool_calls_since_last_update=result.tool_calls_since_last_update,
+            last_update_turn=result.last_update_turn,
+        )
+        self.set_status(status)
+        return status
 
     def update_session_memory(
         self,

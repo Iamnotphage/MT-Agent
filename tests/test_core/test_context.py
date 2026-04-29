@@ -577,14 +577,14 @@ class TestSessionListAndLoad:
         sessions = r2.list_sessions()
         assert len(sessions) == 1
 
-    def test_build_resume_messages_uses_last_compression_snapshot(self, recorder):
-        """resume 只恢复最后一条 compression 摘要及其后的消息。"""
+    def test_build_resume_messages_uses_last_compact_boundary_snapshot(self, recorder):
+        """resume 只恢复最后一条 compact_boundary 及其后的消息。"""
         recorder.record({"type": "transcript_message", "role": "user", "content": "A"})
         recorder.record({"type": "transcript_message", "role": "assistant", "content": "B"})
-        recorder.record({"type": "compression", "summary": "S1"})
+        recorder.record({"type": "compact_boundary", "reason": "threshold_exceeded", "pre_tokens": 100, "post_tokens": 20})
         recorder.record({"type": "transcript_message", "role": "user", "content": "C"})
         recorder.record({"type": "transcript_message", "role": "assistant", "content": "D"})
-        recorder.record({"type": "compression", "summary": "S2"})
+        recorder.record({"type": "compact_boundary", "reason": "threshold_exceeded", "pre_tokens": 200, "post_tokens": 30})
         recorder.record({"type": "transcript_message", "role": "user", "content": "E"})
         recorder.record({"type": "transcript_message", "role": "assistant", "content": "F"})
         filepath = recorder.flush()
@@ -592,23 +592,20 @@ class TestSessionListAndLoad:
         messages = recorder.build_resume_messages(filepath)
 
         assert len(messages) == 3
-        assert "conversation_history_summary" in messages[0].content
-        assert "S2" in messages[0].content
+        assert messages[0].content.startswith("<compact_boundary ")
         assert messages[1].content == "E"
         assert messages[2].content == "F"
 
     def test_build_resume_messages_restores_compact_boundary(self, recorder):
         recorder.record({"type": "compact_boundary", "reason": "auto", "pre_tokens": 100, "post_tokens": 20})
-        recorder.record({"type": "compression", "summary": "S1"})
         recorder.record({"type": "transcript_message", "role": "user", "content": "C"})
         filepath = recorder.flush()
 
         messages = recorder.build_resume_messages(filepath)
 
-        assert len(messages) == 3
+        assert len(messages) == 2
         assert messages[0].content.startswith("<compact_boundary ")
-        assert "conversation_history_summary" in messages[1].content
-        assert messages[2].content == "C"
+        assert messages[1].content == "C"
 
     def test_build_resume_messages_prefers_canonical_transcript(self, recorder):
         """若存在 canonical transcript，应恢复 assistant tool_calls 和 ToolMessage。"""

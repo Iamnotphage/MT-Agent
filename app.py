@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
+from pathlib import Path
 
 from rich.console import Console
 
@@ -67,6 +69,12 @@ class App:
             repl.close()
 
 
+def build_default_log_file_path(base_dir: str | None = None, now: datetime | None = None) -> str:
+    root = Path(base_dir or os.getcwd())
+    ts = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    return str(root / "logs" / f"mt-agent-{ts}.log")
+
+
 def main() -> int:
     import argparse
     import sys
@@ -74,18 +82,28 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="MT-Agent")
     parser.add_argument(
         "--log-level",
-        default=os.environ.get("LOG_LEVEL", "WARNING").upper(),
+        default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="日志级别 (默认: WARNING，使用 INFO 查看工具执行日志)",
     )
     args = parser.parse_args()
 
+    effective_level = args.log_level or "WARNING"
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+
+    if args.log_level is not None:
+        log_path = build_default_log_file_path()
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+
     logging.basicConfig(
-        level=getattr(logging, args.log_level),
+        level=getattr(logging, effective_level),
         format="[%(asctime)s.%(msecs)03d] [%(name)s] %(message)s",
         datefmt="%H:%M:%S",
-        stream=sys.stderr,
+        handlers=handlers,
     )
+    if args.log_level is not None:
+        logging.getLogger(__name__).info("Log file: %s", log_path)
 
     app = App()
     try:
