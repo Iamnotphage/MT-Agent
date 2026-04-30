@@ -6,8 +6,11 @@
 
 from __future__ import annotations
 
+import logging
 import sys
+import time
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from langgraph.types import Command
@@ -16,6 +19,7 @@ from rich.text import Text
 
 from prompt_toolkit.history import InMemoryHistory
 
+from cli.commands.compact import cmd_compact
 from cli.commands.context import cmd_context
 from cli.commands.memory import cmd_memory
 from cli.commands.resume import cmd_resume
@@ -27,12 +31,15 @@ from cli.utils.text import (
     PROMPT_STYLE,
     PROMPT_SYMBOL,
     RISK_STYLE,
+    display_width,
     ljust_cols,
     truncate,
 )
 
 if TYPE_CHECKING:
     from core.agent import AgentRuntime
+
+logger = logging.getLogger(__name__)
 
 
 class Repl:
@@ -46,12 +53,14 @@ class Repl:
         self._closed = False
         self._history = InMemoryHistory()
         self._token_limit = CONTEXT_CONFIG.get("token_limit", 65536)
+        self._working_dir = Path(runtime.context_manager._working_dir)
 
         # 事件处理（渲染 + 录制）
         self._stream = StreamHandler(
             console=console,
             event_bus=runtime.event_bus,
             session=runtime.session,
+            workspace=self._working_dir,
         )
 
     # ── 主循环 ───────────────────────────────────────────────────
@@ -97,8 +106,11 @@ class Repl:
 
         config = {"configurable": {"thread_id": self.thread_id}}
         state_input: dict | Command = {
-            "message": [HumanMessage(content=user_input)],
+            "messages": [HumanMessage(content=user_input)],
         }
+
+        # 启动思考动画
+        self._stream.start_thinking()
 
         try:
             self.runtime.graph.invoke(state_input, config)
@@ -139,7 +151,7 @@ class Repl:
         return requests
 
     def _prompt_approval(self, requests: list[dict]) -> dict[str, bool]:
-        self._stream.end_stream()
+        self._stream.pause_for_prompt()
 
         if not requests:
             return {}
@@ -204,10 +216,19 @@ class Repl:
             return
         self._closed = True
 
+        flush_start = time.time()
         filepath = self.runtime.session.flush()
+        flush_elapsed = time.time() - flush_start
+        if flush_elapsed > 1.0:
+            logger.warning("Session flush took %.3fs", flush_elapsed)
+
         checkpoint_manager = getattr(self.runtime, "checkpoint_manager", None)
         if checkpoint_manager is not None:
+            close_start = time.time()
             checkpoint_manager.__exit__(None, None, None)
+            close_elapsed = time.time() - close_start
+            if close_elapsed > 1.0:
+                logger.warning("Checkpoint manager close took %.3fs", close_elapsed)
             self.runtime.checkpoint_manager = None
         if filepath:
             self.console.print(f"\n  [dim]会话已保存 → {filepath}[/dim]")
@@ -288,7 +309,11 @@ class Repl:
             case "/context":
                 cmd_context(self.console, self.runtime.context_manager, parts[1:])
             case "/memory":
-                cmd_memory(self.console, self.runtime.context_manager, parts[1:])
+                cmd_memory(self.console, self.runtime.memory_manager, parts[1:])
+            case "/compact":
+                # 用 partition 保留多词指令原文
+                _, _, tail = cmd.partition(" ")
+                cmd_compact(self.console, self.runtime, tail.strip())
             case _:
                 self.console.print(f"  [red]未知命令:[/red] {cmd}")
                 self.console.print("  [dim]输入 /help 查看可用命令[/dim]")
@@ -304,6 +329,7 @@ class Repl:
             ("/clear", "清屏"),
             ("/new", "开启新会话 (清空对话历史)"),
             ("/resume", "浏览并恢复历史会话"),
+            ("/compact [instructions]", "手动压缩上下文；无参数优先 session memory，有参数直接 full compact"),
             ("/context show", "显示当前已加载的上下文"),
             ("/context reload", "重新加载上下文文件"),
             ("/memory list", "列出所有已保存的记忆"),
@@ -320,20 +346,55 @@ class Repl:
     # ── 上下文状态 ─────────────────────────────────────────────
 
     def _context_status(self) -> str:
-        """返回上下文占比文本，如 '42%' 或空字符串。"""
-        last = self.runtime.session.stats.last_input_tokens
-        if last <= 0:
-            return ""
-        pct = min(last / self._token_limit * 100, 100)
-        return f"{pct:.0f}%"
+        """返回上下文状态文本，格式: '{model_name} · {剩余百分比}% left · {工作目录}'。"""
+        stats = self.runtime.session.stats
+        model = stats.model or "unknown"
+        last = stats.last_input_tokens
+        effective_limit = stats.last_effective_context_limit or self._token_limit
+
+        if last <= 0 or effective_limit <= 0:
+            remaining_pct = 100
+        else:
+            remaining_pct = max(int((1 - last / effective_limit) * 100), 0)
+
+        # 获取工作目录完整路径，如果在 home 目录下则用 ~ 替换
+        working_dir = str(self._working_dir)
+        home = str(Path.home())
+        if working_dir.startswith(home):
+            working_dir = "~" + working_dir[len(home):]
+
+        return f"{model} · {remaining_pct}% left · {working_dir}"
 
     # ── 渲染辅助 ─────────────────────────────────────────────────
 
     def _render_user_input(self, user_input: str) -> None:
         """用灰色背景重新渲染用户输入行"""
-        sys.stdout.write("\x1b[A\x1b[2K\r")
+        # 计算输入实际占用的行数（考虑换行和自动折行）
+        lines = user_input.split('\n')
+        total_input_lines = 0
+        for line in lines:
+            content = f"{PROMPT_SYMBOL} {line}"
+            # 计算这一行需要多少终端行（考虑自动折行）
+            line_width = display_width(content)
+            total_input_lines += max(1, (line_width + self.console.width - 1) // self.console.width)
+
+        # 需要清除的行数：上分界线(1) + 输入行(N) + 下分界线(1) + 状态栏(1，如果有)
+        lines_to_clear = 1 + total_input_lines + 1
+        if self._context_status():  # 如果有状态栏
+            lines_to_clear += 1
+
+        # 向上移动并清除所有行
+        for _ in range(lines_to_clear):
+            sys.stdout.write("\x1b[A\x1b[2K")
+        sys.stdout.write("\r")
         sys.stdout.flush()
-        line = Text(no_wrap=True)
-        content = f"{PROMPT_SYMBOL} {user_input}"
-        line.append(ljust_cols(content, self.console.width), style=BG_USER)
-        self.console.print(line)
+
+        # 渲染用户输入（支持多行，每行都有背景色）
+        for i, line in enumerate(lines):
+            text = Text(no_wrap=True)
+            if i == 0:
+                content = f"{PROMPT_SYMBOL} {line}"
+            else:
+                content = f"  {line}"  # 续行缩进
+            text.append(ljust_cols(content, self.console.width), style=BG_USER)
+            self.console.print(text)

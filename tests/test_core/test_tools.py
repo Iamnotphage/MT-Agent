@@ -1,10 +1,9 @@
-import asyncio
-
 import pytest
 
-from tools.base import BaseTool, ToolResult, ToolRiskLevel
-from tools.registry import ToolRegistry
-from tools.file_ops.read_file import ReadFileTool
+from langchain_core.tools.base import ToolException
+
+from tools.base import BaseTool, ToolRiskLevel
+from tools.files.read_file import ReadFileTool
 
 
 # ── ReadFileTool ─────────────────────────────────────────────────
@@ -22,88 +21,74 @@ class TestReadFileTool:
     def tool(self, workspace):
         return ReadFileTool(workspace=workspace)
 
-    def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
-
     def test_read_full_file(self, tool):
-        r = self._run(tool.execute(file_path="hello.txt"))
-        assert r.success
-        assert "line1" in r.output
-        assert "line2" in r.output
-        assert r.metadata["total_lines"] == 3
+        content, artifact = tool._run(file_path="hello.txt")
+        assert "1\tline1" in content
+        assert "2\tline2" in content
+        assert artifact["total_lines"] == 3
+        assert artifact["toolUseResult"]["file"]["content"] == "line1\nline2\nline3\n"
 
     def test_read_line_range(self, tool):
-        r = self._run(tool.execute(file_path="hello.txt", start_line=2, end_line=2))
-        assert r.success
-        assert "line2" in r.output
-        assert "line1" not in r.output
+        content, artifact = tool._run(file_path="hello.txt", offset=2, limit=1)
+        assert "2\tline2" in content
+        assert "1\tline1" not in content
+        assert artifact["toolUseResult"]["input"]["offset"] == 2
+        assert artifact["toolUseResult"]["input"]["limit"] == 1
+        assert artifact["toolUseResult"]["file"]["startLine"] == 2
 
     def test_read_subdir(self, tool):
-        r = self._run(tool.execute(file_path="sub/deep.c"))
-        assert r.success
-        assert "int main" in r.output
+        content, artifact = tool._run(file_path="sub/deep.c")
+        assert "1\tint main() {}" in content
 
     def test_file_not_found(self, tool):
-        r = self._run(tool.execute(file_path="nope.txt"))
-        assert not r.success
-        assert "不存在" in r.error
+        with pytest.raises(ToolException, match="不存在"):
+            tool._run(file_path="nope.txt")
 
     def test_path_traversal_blocked(self, tool):
-        r = self._run(tool.execute(file_path="../../etc/passwd"))
-        assert not r.success
-        assert "越界" in r.error
+        with pytest.raises(ToolException, match="越界"):
+            tool._run(file_path="../../etc/passwd")
 
     def test_truncation(self, workspace):
         big = "\n".join(f"L{i}" for i in range(1000))
         (workspace / "big.txt").write_text(big)
         tool = ReadFileTool(workspace=workspace)
-        r = self._run(tool.execute(file_path="big.txt"))
-        assert r.success
-        assert r.metadata["truncated"] is True
-        assert "truncated" in r.output
+        content, artifact = tool._run(file_path="big.txt")
+        assert artifact["truncated"] is True
+        assert "Content truncated" in content
 
-    def test_schema_shape(self, tool):
-        s = tool.schema
-        assert s["type"] == "function"
-        assert s["function"]["name"] == "read_file"
-        assert "file_path" in s["function"]["parameters"]["properties"]
+    def test_file_unchanged_stub(self, tool):
+        first_content, first_artifact = tool._run(file_path="hello.txt", offset=1, limit=2)
+        second_content, second_artifact = tool._run(file_path="hello.txt", offset=1, limit=2)
 
+        assert "1\tline1" in first_content
+        assert second_content == "File unchanged since last read for the same range."
+        assert second_artifact["toolUseResult"]["type"] == "file_unchanged"
 
-# ── ToolRegistry ─────────────────────────────────────────────────
+    def test_invoke_via_langchain(self, tool):
+        """langchain invoke 接口可用"""
+        result = tool.invoke({"file_path": "hello.txt"})
+        assert "1\tline1" in result
 
-class TestToolRegistry:
+    def test_tool_has_name_and_description(self, tool):
+        assert tool.name == "read_file"
+        assert len(tool.description) > 0
 
-    @pytest.fixture()
-    def registry(self, tmp_path):
-        reg = ToolRegistry()
-        reg.register(ReadFileTool(workspace=tmp_path))
-        return reg
+    def test_risk_level(self, tool):
+        assert tool.risk_level == ToolRiskLevel.LOW
 
-    def test_register_and_lookup(self, registry):
-        assert "read_file" in registry
-        assert registry.get("read_file") is not None
-        assert len(registry) == 1
+    def test_absolute_path_outside_workspace_blocked(self, tool, tmp_path):
+        outside = tmp_path.parent / "outside_workspace.txt"
+        outside.write_text("secret\n")
 
-    def test_schemas_list(self, registry):
-        schemas = registry.schemas
-        assert len(schemas) == 1
-        assert schemas[0]["function"]["name"] == "read_file"
+        with pytest.raises(ToolException, match="越界"):
+            tool._run(file_path=str(outside))
 
-    def test_execute_unknown_tool(self, registry):
-        r = asyncio.get_event_loop().run_until_complete(
-            registry.execute("no_such_tool", {})
-        )
-        assert not r.success
-        assert "未知工具" in r.error
+    def test_sibling_prefix_path_blocked(self, workspace):
+        sibling = workspace.parent / f"{workspace.name}2"
+        sibling.mkdir()
+        victim = sibling / "secret.txt"
+        victim.write_text("secret\n")
+        tool = ReadFileTool(workspace=workspace)
 
-    def test_execute_with_validation(self, registry, tmp_path):
-        (tmp_path / "a.txt").write_text("hello")
-        r = asyncio.get_event_loop().run_until_complete(
-            registry.execute("read_file", {"file_path": "a.txt"})
-        )
-        assert r.success
-        assert "hello" in r.output
-
-    def test_needs_confirmation(self, registry):
-        assert registry.needs_confirmation("read_file") is False
-        assert registry.needs_confirmation("unknown") is True
+        with pytest.raises(ToolException, match="越界"):
+            tool._run(file_path=str(victim))

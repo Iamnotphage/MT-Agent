@@ -26,21 +26,27 @@ SYSTEM_PROMPT_TEMPLATE = """\
 3. 遇到编译错误时分析原因并修复
 4. 用中文回答用户问题
 5. 当用户要求你记住某事时，调用 save_memory 工具。仅保存跨会话通用的用户偏好、个人事实或高层级信息。不要保存工作区路径、临时会话状态、代码变更摘要或调试过程中的发现
+6. **重要：当需要执行多个独立的工具调用时（如读取多个文件、搜索多个模式），请在一次响应中返回所有 tool_calls，系统会自动并行执行它们以提高效率**
 
 如果需要使用工具，请通过 function calling 调用。当任务完成或不需要工具时，直接给出文本回答。\
 """
 
 
-def _format_tool_section(tool_schemas: list[dict[str, Any]]) -> str:
-    """将 OpenAI function schemas 渲染为 Markdown 列表"""
-    if not tool_schemas:
+def _format_tool_section(tools: list | None) -> str:
+    """将工具列表渲染为 Markdown 列表 — 支持 BaseTool 实例或 OpenAI schema dict"""
+    if not tools:
         return ""
     lines = ["", "## 可用工具"]
-    for schema in tool_schemas:
-        func = schema.get("function", schema)
-        name = func.get("name", "")
-        desc = func.get("description", "")
-        lines.append(f"- **{name}**: {desc}")
+    for tool in tools:
+        if hasattr(tool, "name") and hasattr(tool, "description"):
+            # langchain BaseTool instance
+            lines.append(f"- **{tool.name}**: {tool.description}")
+        else:
+            # legacy OpenAI function schema dict
+            func = tool.get("function", tool)
+            name = func.get("name", "")
+            desc = func.get("description", "")
+            lines.append(f"- **{name}**: {desc}")
     return "\n".join(lines) + "\n"
 
 
@@ -67,7 +73,7 @@ def _format_global_context_section(context_text: str) -> str:
 
 def build_system_prompt(
     state: dict[str, Any],
-    tool_schemas: list[dict[str, Any]] | None = None,
+    tools: list | None = None,
     global_context: str = "",
 ) -> str:
     """
@@ -75,11 +81,11 @@ def build_system_prompt(
 
     Args:
         state: AgentState (或兼容 dict)
-        tool_schemas: OpenAI function-calling 格式的工具 schema 列表
+        tools: 工具实例列表或 OpenAI function schema 列表
         global_context: Tier 1 全局上下文内容（来自 ContextManager.build_system_context()）
     """
     return SYSTEM_PROMPT_TEMPLATE.format(
-        tool_section=_format_tool_section(tool_schemas or []),
+        tool_section=_format_tool_section(tools or []),
         global_context_section=_format_global_context_section(global_context),
         runtime_context_section=_format_context_section(state),
     )

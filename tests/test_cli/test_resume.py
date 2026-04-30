@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,7 +52,7 @@ def test_cmd_resume_restores_existing_checkpoint(monkeypatch, tmp_path):
     recorder, filepath = _make_recorder(tmp_path)
     console = Console(record=True, width=100)
     graph = _FakeGraph(SimpleNamespace(
-        values={"message": recorder.build_resume_messages(filepath)},
+        values={"messages": recorder.build_resume_messages(filepath)},
         next=(),
     ))
 
@@ -84,7 +85,7 @@ def test_cmd_resume_marks_interrupted_tool_execution(monkeypatch, tmp_path):
     console = Console(record=True, width=100)
     graph = _FakeGraph(SimpleNamespace(
         values={
-            "message": recorder.build_resume_messages(filepath),
+            "messages": recorder.build_resume_messages(filepath),
             "pending_tool_calls": [{
                 "call_id": "call_1",
                 "tool_name": "read_file",
@@ -94,7 +95,7 @@ def test_cmd_resume_marks_interrupted_tool_execution(monkeypatch, tmp_path):
                 "error_msg": None,
             }],
         },
-        next=("tool_execution",),
+        next=("tools",),
     ))
 
     monkeypatch.setattr(resume_mod, "_session_picker", lambda sessions: sessions[0])
@@ -104,10 +105,10 @@ def test_cmd_resume_marks_interrupted_tool_execution(monkeypatch, tmp_path):
 
     assert thread_id == "thread-restore"
     assert graph.update_called is True
-    assert graph.update_args["as_node"] == "observation"
+    assert graph.update_args["as_node"] == "tools"
     assert graph.update_args["values"]["pending_tool_calls"] == []
     assert graph.update_args["values"]["should_continue"] is False
-    assert len(graph.update_args["values"]["message"]) == 1
+    assert len(graph.update_args["values"]["messages"]) == 1
 
 
 def test_cmd_resume_rejects_inconsistent_awaiting_approval(monkeypatch, tmp_path):
@@ -115,7 +116,7 @@ def test_cmd_resume_rejects_inconsistent_awaiting_approval(monkeypatch, tmp_path
     console = Console(record=True, width=100)
     graph = _FakeGraph(SimpleNamespace(
         values={
-            "message": recorder.build_resume_messages(filepath),
+            "messages": recorder.build_resume_messages(filepath),
             "pending_tool_calls": [{
                 "call_id": "call_1",
                 "tool_name": "write_file",
@@ -142,7 +143,7 @@ def test_cmd_resume_allows_reapproval_when_interrupt_present(monkeypatch, tmp_pa
     console = Console(record=True, width=100)
     graph = _FakeGraph(SimpleNamespace(
         values={
-            "message": recorder.build_resume_messages(filepath),
+            "messages": recorder.build_resume_messages(filepath),
             "pending_tool_calls": [{
                 "call_id": "call_1",
                 "tool_name": "write_file",
@@ -176,7 +177,7 @@ def test_cmd_resume_warns_when_checkpoint_and_transcript_diverge(monkeypatch, tm
     console = Console(record=True, width=100)
     graph = _FakeGraph(SimpleNamespace(
         values={
-            "message": recorder.build_resume_messages(filepath) + recorder.build_resume_messages(filepath),
+            "messages": recorder.build_resume_messages(filepath) + recorder.build_resume_messages(filepath),
         },
         next=(),
         tasks=(),
@@ -189,3 +190,222 @@ def test_cmd_resume_warns_when_checkpoint_and_transcript_diverge(monkeypatch, tm
 
     assert thread_id == "thread-restore"
     assert "历史长度不一致" in console.export_text()
+
+
+def test_render_resumed_history_uses_assistant_reasoning_content():
+    console = Console(record=True, width=100)
+
+    resume_mod._render_resumed_history(console, [
+        {
+            "type": "transcript_message",
+            "role": "assistant",
+            "content": "I found the file.",
+            "reasoning_content": "I should read the file first.",
+        }
+    ])
+
+    rendered = console.export_text()
+    assert "💭 I should read the file first." in rendered
+    assert "⏺ I found the file." in rendered
+
+
+def test_build_resume_messages_uses_session_memory_summary(tmp_path):
+    recorder, _ = _make_recorder(tmp_path)
+    summary_dir = recorder.get_session_memory_artifact_dir()
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    (summary_dir / "summary.md").write_text("# Session Title\nSaved memory", encoding="utf-8")
+
+    recorder.record({
+        "type": "session_memory_update",
+        "summary_path": "session-memory/summary.md",
+        "last_summarized_message_id": "m2",
+        "tokens_at_last_extraction": 12000,
+        "tool_calls_since_last_update": 0,
+        "turn": 1,
+    })
+    recorder.record({
+        "type": "compact_boundary",
+        "reason": "session_memory",
+        "pre_tokens": 100,
+        "post_tokens": 30,
+    })
+    recorder.record({"type": "transcript_message", "role": "user", "content": "continue"})
+    filepath = recorder.flush()
+
+    messages = recorder.build_resume_messages(filepath)
+
+    assert messages[0].content.startswith("<compact_boundary ")
+    assert messages[1].content.startswith("<session_memory_summary ")
+    assert "Saved memory" in messages[1].content
+    assert messages[2].content == "continue"
+
+
+def test_build_resume_messages_reads_session_memory_from_resumed_session_id(tmp_path):
+    old_recorder, _ = _make_recorder(tmp_path)
+    summary_dir = old_recorder.get_session_memory_artifact_dir()
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    (summary_dir / "summary.md").write_text("# Session Title\nSaved memory", encoding="utf-8")
+
+    old_recorder.record({
+        "type": "session_memory_update",
+        "summary_path": "session-memory/summary.md",
+        "last_summarized_message_id": "m2",
+        "tokens_at_last_extraction": 12000,
+        "tool_calls_since_last_update": 0,
+        "turn": 1,
+    })
+    old_recorder.record({
+        "type": "compact_boundary",
+        "reason": "session_memory",
+        "pre_tokens": 100,
+        "post_tokens": 30,
+    })
+    filepath = old_recorder.flush()
+
+    new_recorder = SessionRecorder(
+        working_directory=str(tmp_path / "project"),
+        config=old_recorder._config,
+    )
+
+    messages = new_recorder.build_resume_messages(filepath)
+
+    assert len(messages) == 2
+    assert messages[0].content.startswith("<compact_boundary ")
+    assert messages[1].content.startswith("<session_memory_summary ")
+    assert "Saved memory" in messages[1].content
+
+
+def test_build_resume_messages_does_not_drop_transcript_for_session_memory_update_only(tmp_path):
+    recorder, _ = _make_recorder(tmp_path)
+    recorder.record({
+        "type": "session_memory_update",
+        "summary_path": "session-memory/summary.md",
+        "last_summarized_message_id": "m2",
+        "tokens_at_last_extraction": 12000,
+        "tool_calls_since_last_update": 0,
+        "turn": 1,
+    })
+    filepath = recorder.flush()
+
+    messages = recorder.build_resume_messages(filepath)
+
+    assert len(messages) == 2
+    assert messages[0].content == "hello"
+    assert messages[1].content == "world"
+
+
+def test_cmd_resume_reuses_selected_session_id_when_flushing(monkeypatch, tmp_path):
+    recorder, filepath = _make_recorder(tmp_path)
+    old_session_id = recorder.stats.session_id
+
+    resumed_recorder = SessionRecorder(
+        working_directory=str(tmp_path / "project"),
+        config=recorder._config,
+    )
+    console = Console(record=True, width=100)
+    graph = _FakeGraph(SimpleNamespace(
+        values={"messages": recorder.build_resume_messages(filepath)},
+        next=(),
+        tasks=(),
+    ))
+
+    monkeypatch.setattr(resume_mod, "_session_picker", lambda sessions: sessions[0])
+    monkeypatch.setattr(resume_mod, "_render_resumed_history", lambda console, records: None)
+
+    thread_id = resume_mod.cmd_resume(console, resumed_recorder, graph)
+
+    assert thread_id == "thread-restore"
+    assert resumed_recorder.stats.session_id == old_session_id
+
+    resumed_recorder.record({"type": "transcript_message", "role": "user", "content": "after resume"})
+    new_filepath = resumed_recorder.flush()
+
+    assert old_session_id in new_filepath.name
+
+
+def test_cmd_resume_emits_info_logs(monkeypatch, tmp_path, caplog):
+    recorder, filepath = _make_recorder(tmp_path)
+    console = Console(record=True, width=100)
+    graph = _FakeGraph(SimpleNamespace(
+        values={"messages": recorder.build_resume_messages(filepath)},
+        next=(),
+        tasks=(),
+    ))
+
+    monkeypatch.setattr(resume_mod, "_session_picker", lambda sessions: sessions[0])
+    monkeypatch.setattr(resume_mod, "_render_resumed_history", lambda console, records: None)
+
+    caplog.set_level(logging.INFO)
+    thread_id = resume_mod.cmd_resume(console, recorder, graph)
+
+    assert thread_id == "thread-restore"
+    text = caplog.text
+    assert "resume: discovered sessions count=1" in text
+    assert "resume: selected filepath=" in text
+    assert "resume: renderable records count=2" in text
+    assert "resume: built messages count=2" in text
+    assert "resume: loading checkpoint thread_id=thread-restore" in text
+    assert "resume_from: bound session file=" in text
+    assert "resume: completed thread_id=thread-restore" in text
+
+
+def test_cmd_resume_restores_full_compact_summary(monkeypatch, tmp_path):
+    recorder, _ = _make_recorder(tmp_path)
+    recorder.record({
+        "type": "compact_boundary",
+        "reason": "threshold_exceeded",
+        "pre_tokens": 100,
+        "post_tokens": 20,
+    })
+    recorder.record({
+        "type": "transcript_message",
+        "role": "system",
+        "content": "<conversation_history_summary>\nsummary\n</conversation_history_summary>",
+        "name": "compact_summary",
+    })
+    recorder.record({"type": "transcript_message", "role": "user", "content": "continue"})
+    filepath = recorder.flush()
+
+    messages = recorder.build_resume_messages(filepath)
+    assert messages[0].content.startswith("<compact_boundary ")
+    assert "conversation_history_summary" in messages[1].content
+    assert messages[2].content == "continue"
+
+    graph = _FakeGraph(SimpleNamespace(
+        values={"messages": messages},
+        next=(),
+        tasks=(),
+    ))
+
+    monkeypatch.setattr(resume_mod, "_session_picker", lambda sessions: sessions[0])
+    monkeypatch.setattr(resume_mod, "_render_resumed_history", lambda console, records: None)
+
+    console = Console(record=True, width=100)
+    thread_id = resume_mod.cmd_resume(console, recorder, graph)
+
+    assert thread_id == "thread-restore"
+
+
+def test_build_resume_messages_recognizes_compact_summary_transcript(tmp_path):
+    """transcript fallback 能正确识别 <conversation_history_summary> 包装的摘要。"""
+    recorder, _ = _make_recorder(tmp_path)
+    recorder.record({
+        "type": "compact_boundary",
+        "reason": "manual",
+        "pre_tokens": 200,
+        "post_tokens": 50,
+    })
+    recorder.record({
+        "type": "transcript_message",
+        "role": "system",
+        "content": "<conversation_history_summary>\nDetailed summary of work done.\n</conversation_history_summary>",
+        "name": "compact_summary",
+    })
+    filepath = recorder.flush()
+
+    messages = recorder.build_resume_messages(filepath)
+
+    assert len(messages) == 2
+    assert messages[0].content.startswith("<compact_boundary ")
+    assert messages[1].content.startswith("<conversation_history_summary>")
+    assert "Detailed summary of work done." in messages[1].content

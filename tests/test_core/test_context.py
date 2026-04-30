@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.context import ContextManager, MEMORY_SECTION_HEADER
+from core.memory import MemoryManager
 from core.session import SessionStats, SessionRecorder
 from core.utils.tokens import estimate_tokens
 from config.settings import CONTEXT as DEFAULT_CONFIG
@@ -50,6 +51,15 @@ def cm(tmp_workspace, config):
     return ContextManager(working_directory=str(tmp_workspace), config=config)
 
 
+@pytest.fixture
+def mm(cm, config):
+    """创建 MemoryManager 实例。"""
+    return MemoryManager(
+        Path(config["global_dir"]) / "CONTEXT.md",
+        on_update=cm.refresh_global_context,
+    )
+
+
 # ---------------------------------------------------------------------------
 # estimate_tokens
 # ---------------------------------------------------------------------------
@@ -82,6 +92,11 @@ class TestSessionStats:
         assert ss.total_tokens == 0
         assert ss.turn_count == 0
         assert ss.tool_calls_total == 0
+        assert ss.last_effective_context_limit == 0
+        assert ss.last_auto_compact_threshold == 0
+        assert ss.last_tokens_until_compact == 0
+        assert ss.last_tool_result_chars == 0
+        assert ss.compression_failure_count == 0
 
     def test_record_llm_usage(self):
         ss = SessionStats()
@@ -106,12 +121,19 @@ class TestSessionStats:
     def test_to_dict(self):
         ss = SessionStats()
         ss.record_llm_usage(100, 50, "test-model")
+        ss.last_effective_context_limit = 111072
+        ss.last_auto_compact_threshold = 98072
+        ss.last_tokens_until_compact = 97000
         d = ss.to_dict()
         assert d["model"] == "test-model"
         assert d["tokens"]["input"] == 100
         assert d["tokens"]["output"] == 50
         assert d["tokens"]["total"] == 150
         assert d["turns"] == 1
+        assert d["context"]["last_input_tokens"] == 100
+        assert d["context"]["effective_context_limit"] == 111072
+        assert d["context"]["auto_compact_threshold"] == 98072
+        assert d["context"]["tokens_until_compact"] == 97000
 
     def test_duration(self):
         ss = SessionStats()
@@ -194,14 +216,27 @@ class TestBuildSessionContext:
 # ---------------------------------------------------------------------------
 
 class TestMemoryCRUD:
-    def test_save_memory_creates_section(self, cm, config):
+    def test_context_cache_updates_after_save_memory(self, cm, mm, config):
+        """save_memory 后无需 reload 也能更新 system context 和 stats。"""
+        global_dir = Path(config["global_dir"])
+        (global_dir / "CONTEXT.md").write_text("全局指令", encoding="utf-8")
+        cm.load()
+
+        mm.save_memory("缓存应立即刷新")
+
+        assert "缓存应立即刷新" in cm.build_system_context()
+        assert "缓存应立即刷新" in mm.get_memories(cm.build_system_context())
+        assert cm.stats["memories_count"] == 1
+
+    def test_save_memory_creates_section(self, cm, mm, config):
         """首次保存 memory 时创建 ## Agent Memories section。"""
         global_dir = Path(config["global_dir"])
         (global_dir / "CONTEXT.md").write_text("全局指令", encoding="utf-8")
         cm.load()
 
-        cm.save_memory("用户偏好 AM 模式")
-        memories = cm.get_memories()
+        updated = mm.save_memory("用户偏好 AM 模式")
+        cm.reload()
+        memories = mm.get_memories(updated or "")
         assert len(memories) == 1
         assert "用户偏好 AM 模式" in memories[0]
 
@@ -211,69 +246,82 @@ class TestMemoryCRUD:
         assert "- 用户偏好 AM 模式" in content
         assert "全局指令" in content  # 原有内容不丢失
 
-    def test_save_multiple_memories(self, cm, config):
+    def test_save_multiple_memories(self, cm, mm, config):
         """保存多条 memory。"""
         global_dir = Path(config["global_dir"])
         (global_dir / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
 
-        cm.save_memory("fact 1")
-        cm.save_memory("fact 2")
-        cm.save_memory("fact 3")
-        assert len(cm.get_memories()) == 3
+        mm.save_memory("fact 1")
+        mm.save_memory("fact 2")
+        updated = mm.save_memory("fact 3")
+        assert len(mm.get_memories(updated or "")) == 3
 
-    def test_save_memory_to_nonexistent_file(self, cm, config):
+    def test_save_memory_to_nonexistent_file(self, cm, mm, config):
         """全局 CONTEXT.md 不存在时自动创建。"""
         cm.load()
-        cm.save_memory("new fact")
-        assert len(cm.get_memories()) == 1
+        updated = mm.save_memory("new fact")
+        assert len(mm.get_memories(updated or "")) == 1
 
         content = (Path(config["global_dir"]) / "CONTEXT.md").read_text(encoding="utf-8")
         assert "- new fact" in content
 
-    def test_save_memory_sanitizes_input(self, cm, config):
+    def test_save_memory_sanitizes_input(self, cm, mm, config):
         """移除换行和前导 dash。"""
         (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
 
-        cm.save_memory("- multi\nline\nfact")
-        memories = cm.get_memories()
+        updated = mm.save_memory("- multi\nline\nfact")
+        memories = mm.get_memories(updated or "")
         assert len(memories) == 1
         assert "\n" not in memories[0]
         assert not memories[0].startswith("- ")
 
-    def test_save_empty_memory_ignored(self, cm, config):
+    def test_save_empty_memory_ignored(self, cm, mm, config):
         """空内容不保存。"""
         (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
-        cm.save_memory("")
-        cm.save_memory("   ")
-        assert len(cm.get_memories()) == 0
+        mm.save_memory("")
+        updated = mm.save_memory("   ")
+        assert len(mm.get_memories(updated or "")) == 0
 
-    def test_remove_memory(self, cm, config):
+    def test_remove_memory(self, cm, mm, config):
         """按索引删除 memory。"""
         (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
 
-        cm.save_memory("keep this")
-        cm.save_memory("remove this")
-        cm.save_memory("keep this too")
+        mm.save_memory("keep this")
+        mm.save_memory("remove this")
+        mm.save_memory("keep this too")
 
-        result = cm.remove_memory(1)
+        result, updated = mm.remove_memory(1)
         assert result is True
-        memories = cm.get_memories()
+        memories = mm.get_memories(updated or "")
         assert len(memories) == 2
         assert "remove this" not in memories
 
-    def test_remove_memory_invalid_index(self, cm, config):
+    def test_context_cache_updates_after_remove_memory(self, cm, mm, config):
+        """remove_memory 后无需 reload 也能更新缓存统计。"""
+        (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
+        cm.load()
+
+        mm.save_memory("keep")
+        mm.save_memory("remove")
+        ok, _ = mm.remove_memory(1)
+
+        assert ok is True
+        assert mm.get_memories(cm.build_system_context()) == ["keep"]
+        assert cm.stats["memories_count"] == 1
+
+    def test_remove_memory_invalid_index(self, cm, mm, config):
         """无效索引返回 False。"""
         (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
-        cm.save_memory("only one")
-        assert cm.remove_memory(5) is False
-        assert cm.remove_memory(-1) is False
+        mm.save_memory("only one")
+        assert mm.remove_memory(5)[0] is False
+        assert mm.remove_memory(-1)[0] is False
 
-    def test_memory_persists_with_existing_content(self, cm, config):
+    def test_memory_persists_with_existing_content(self, cm, mm, config):
         """已有内容和其他 section 不被破坏。"""
         global_dir = Path(config["global_dir"])
         (global_dir / "CONTEXT.md").write_text(
@@ -281,7 +329,7 @@ class TestMemoryCRUD:
             encoding="utf-8",
         )
         cm.load()
-        cm.save_memory("a fact")
+        mm.save_memory("a fact")
 
         content = (global_dir / "CONTEXT.md").read_text(encoding="utf-8")
         assert "# My Config" in content
@@ -335,6 +383,8 @@ class TestSessionHistory:
         """自动添加 timestamp。"""
         recorder.record({"type": "transcript_message", "role": "user", "content": "test"})
         assert "timestamp" in recorder._records[0]
+        assert recorder._records[0]["toolUseResult"] is None
+        assert recorder._records[0]["artifact"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -388,40 +438,35 @@ class TestEnsureGlobalSetup:
 # ---------------------------------------------------------------------------
 
 class TestSaveMemoryTool:
-    def test_save_via_tool(self, cm, config):
+    def test_save_via_tool(self, cm, mm, config):
         """通过 SaveMemoryTool 保存记忆。"""
-        import asyncio
-        from tools.agent_ops.memory import SaveMemoryTool
+        from tools.agent.memory import SaveMemoryTool
 
         (Path(config["global_dir"]) / "CONTEXT.md").write_text("", encoding="utf-8")
         cm.load()
 
-        tool = SaveMemoryTool(save_fn=cm.save_memory)
-        result = asyncio.run(tool.execute(fact="用户偏好 AM 模式"))
+        tool = SaveMemoryTool(save_fn=mm.save_memory)
+        content, artifact = tool._run(fact="用户偏好 AM 模式")
 
-        assert result.success
-        assert "已保存" in result.output
-        assert len(cm.get_memories()) == 1
+        assert "已保存" in content
+        assert len(mm.get_memories((Path(config["global_dir"]) / "CONTEXT.md").read_text(encoding="utf-8"))) == 1
 
     def test_empty_fact_rejected(self):
         """空 fact 被拒绝。"""
-        import asyncio
-        from tools.agent_ops.memory import SaveMemoryTool
+        from langchain_core.tools.base import ToolException
+        from tools.agent.memory import SaveMemoryTool
 
         tool = SaveMemoryTool(save_fn=lambda f: None)
-        result = asyncio.run(tool.execute(fact=""))
+        with pytest.raises(ToolException, match="不能为空"):
+            tool._run(fact="")
 
-        assert not result.success
-        assert "不能为空" in result.error
-
-    def test_schema_shape(self):
-        """Tool schema 格式正确。"""
-        from tools.agent_ops.memory import SaveMemoryTool
+    def test_invoke_via_langchain(self):
+        """langchain invoke 接口可用"""
+        from tools.agent.memory import SaveMemoryTool
 
         tool = SaveMemoryTool(save_fn=lambda f: None)
-        schema = tool.schema
-        assert schema["function"]["name"] == "save_memory"
-        assert "fact" in schema["function"]["parameters"]["properties"]
+        result = tool.invoke({"fact": "test fact"})
+        assert "已保存" in result
 
 
 # ---------------------------------------------------------------------------
@@ -532,14 +577,14 @@ class TestSessionListAndLoad:
         sessions = r2.list_sessions()
         assert len(sessions) == 1
 
-    def test_build_resume_messages_uses_last_compression_snapshot(self, recorder):
-        """resume 只恢复最后一条 compression 摘要及其后的消息。"""
+    def test_build_resume_messages_uses_last_compact_boundary_snapshot(self, recorder):
+        """resume 只恢复最后一条 compact_boundary 及其后的消息。"""
         recorder.record({"type": "transcript_message", "role": "user", "content": "A"})
         recorder.record({"type": "transcript_message", "role": "assistant", "content": "B"})
-        recorder.record({"type": "compression", "summary": "S1"})
+        recorder.record({"type": "compact_boundary", "reason": "threshold_exceeded", "pre_tokens": 100, "post_tokens": 20})
         recorder.record({"type": "transcript_message", "role": "user", "content": "C"})
         recorder.record({"type": "transcript_message", "role": "assistant", "content": "D"})
-        recorder.record({"type": "compression", "summary": "S2"})
+        recorder.record({"type": "compact_boundary", "reason": "threshold_exceeded", "pre_tokens": 200, "post_tokens": 30})
         recorder.record({"type": "transcript_message", "role": "user", "content": "E"})
         recorder.record({"type": "transcript_message", "role": "assistant", "content": "F"})
         filepath = recorder.flush()
@@ -547,10 +592,59 @@ class TestSessionListAndLoad:
         messages = recorder.build_resume_messages(filepath)
 
         assert len(messages) == 3
-        assert "conversation_history_summary" in messages[0].content
-        assert "S2" in messages[0].content
+        assert messages[0].content.startswith("<compact_boundary ")
         assert messages[1].content == "E"
         assert messages[2].content == "F"
+
+    def test_build_resume_messages_restores_compact_boundary(self, recorder):
+        recorder.record({"type": "compact_boundary", "reason": "auto", "pre_tokens": 100, "post_tokens": 20})
+        recorder.record({"type": "transcript_message", "role": "user", "content": "C"})
+        filepath = recorder.flush()
+
+        messages = recorder.build_resume_messages(filepath)
+
+        assert len(messages) == 2
+        assert messages[0].content.startswith("<compact_boundary ")
+        assert messages[1].content == "C"
+
+    def test_build_resume_messages_restores_full_compact_summary_from_transcript(self, recorder):
+        """full compact 后 resume 应从 transcript 恢复 summary。"""
+        recorder.record({"type": "transcript_message", "role": "user", "content": "A"})
+        recorder.record({"type": "compact_boundary", "reason": "threshold_exceeded", "pre_tokens": 100, "post_tokens": 20})
+        recorder.record({
+            "type": "transcript_message",
+            "role": "system",
+            "content": "<conversation_history_summary>\nsummary text\n</conversation_history_summary>",
+            "name": "compact_summary",
+        })
+        recorder.record({"type": "transcript_message", "role": "user", "content": "B"})
+        filepath = recorder.flush()
+
+        messages = recorder.build_resume_messages(filepath)
+
+        assert len(messages) == 3
+        assert messages[0].content.startswith("<compact_boundary ")
+        assert "conversation_history_summary" in messages[1].content
+        assert "summary text" in messages[1].content
+        assert messages[2].content == "B"
+
+    def test_build_resume_messages_full_compact_no_double_inject(self, recorder):
+        """full compact summary 不应被重复注入。"""
+        recorder.record({"type": "compact_boundary", "reason": "auto", "pre_tokens": 200, "post_tokens": 30})
+        recorder.record({
+            "type": "transcript_message",
+            "role": "system",
+            "content": "<conversation_history_summary>\nS1\n</conversation_history_summary>",
+            "name": "compact_summary",
+        })
+        recorder.record({"type": "transcript_message", "role": "user", "content": "continue"})
+        filepath = recorder.flush()
+
+        messages = recorder.build_resume_messages(filepath)
+
+        assert len(messages) == 3
+        summary_count = sum(1 for m in messages if "conversation_history_summary" in m.content)
+        assert summary_count == 1
 
     def test_build_resume_messages_prefers_canonical_transcript(self, recorder):
         """若存在 canonical transcript，应恢复 assistant tool_calls 和 ToolMessage。"""
@@ -586,6 +680,81 @@ class TestSessionListAndLoad:
         assert messages[1].tool_calls[0]["name"] == "read_file"
         assert messages[2].tool_call_id == "call_1"
         assert messages[2].content == "file content"
+
+    def test_build_resume_messages_restores_reasoning_content(self, recorder):
+        recorder.record({
+            "type": "transcript_message",
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "need one more tool step",
+            "tool_calls": [{
+                "name": "read_file",
+                "args": {"path": "a.py"},
+                "id": "call_1",
+                "type": "tool_call",
+            }],
+        })
+        filepath = recorder.flush()
+
+        messages = recorder.build_resume_messages(filepath)
+
+        assert len(messages) == 1
+        assert messages[0].additional_kwargs["reasoning_content"] == "need one more tool step"
+
+    def test_build_resume_messages_restores_empty_reasoning_content(self, recorder):
+        recorder.record({
+            "type": "transcript_message",
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "",
+            "tool_calls": [{
+                "name": "read_file",
+                "args": {"path": "a.py"},
+                "id": "call_1",
+                "type": "tool_call",
+            }],
+        })
+        filepath = recorder.flush()
+
+        messages = recorder.build_resume_messages(filepath)
+
+        assert len(messages) == 1
+        assert "reasoning_content" in messages[0].additional_kwargs
+        assert messages[0].additional_kwargs["reasoning_content"] == ""
+
+    def test_build_resume_messages_accepts_new_tool_fields(self, recorder):
+        """新 transcript 字段不应破坏 ToolMessage 恢复。"""
+        recorder.record({
+            "type": "transcript_message",
+            "role": "tool",
+            "content": "preview",
+            "tool_call_id": "call_1",
+            "name": "grep",
+            "toolUseResult": {
+                "kind": "text",
+                "artifact": "tool-results/call_1.txt",
+                "truncated": True,
+            },
+            "artifact": {
+                "path": "tool-results/call_1.txt",
+            },
+        })
+        filepath = recorder.flush()
+
+        messages = recorder.build_resume_messages(filepath)
+
+        assert len(messages) == 1
+        assert messages[0].tool_call_id == "call_1"
+        assert messages[0].content == "preview"
+
+    def test_get_artifact_dir_uses_session_id(self, recorder):
+        path = recorder.get_artifact_dir()
+        assert path.name == recorder.stats.session_id
+
+    def test_get_tool_result_artifact_path(self, recorder):
+        path = recorder.get_tool_result_artifact_path("call_1")
+        assert path.name == "call_1.txt"
+        assert "tool-results" in path.as_posix()
 
     def test_estimate_messages_tokens_returns_positive_value(self, recorder):
         """估算 resume 消息 token 数，用于初始 context 占比。"""

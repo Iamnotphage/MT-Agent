@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from prompt_toolkit import Application
@@ -17,6 +18,8 @@ from rich.text import Text
 from cli.utils.text import BG_USER, PROMPT_STYLE, PROMPT_SYMBOL, TOOL_DISPLAY, ljust_cols, truncate
 from core.session import SessionRecorder, format_file_size, format_relative_time
 
+logger = logging.getLogger(__name__)
+
 
 def cmd_resume(
     console: Console,
@@ -30,29 +33,42 @@ def cmd_resume(
         新的 thread_id（恢复成功时），或 None（取消/失败时）。
     """
     sessions = session.list_sessions()
+    logger.info("resume: discovered sessions count=%d", len(sessions))
     if not sessions:
         console.print("  [dim]暂无历史会话。[/dim]")
         return None
 
     selected = _session_picker(sessions)
     if selected is None:
+        logger.info("resume: selection cancelled")
         console.print("  [dim]已取消[/dim]")
         return None
 
     filepath = selected["filepath"]
+    logger.info(
+        "resume: selected filepath=%s session_id=%s thread_id=%s",
+        filepath,
+        selected.get("session_id", ""),
+        selected.get("thread_id", ""),
+    )
 
     records = session.load_session(filepath)
+    logger.info("resume: renderable records count=%d filepath=%s", len(records), filepath)
     if not records:
+        logger.info("resume: abort empty renderable records filepath=%s", filepath)
         console.print("  [red]会话为空，无法恢复[/red]")
         return None
 
     thread_id = str(selected.get("thread_id") or "").strip()
     messages = session.build_resume_messages(filepath)
+    logger.info("resume: built messages count=%d filepath=%s", len(messages), filepath)
     if not messages:
+        logger.info("resume: abort no resumable messages filepath=%s", filepath)
         console.print("  [red]没有可恢复的消息[/red]")
         return None
 
     if not thread_id:
+        logger.info("resume: abort missing thread_id filepath=%s", filepath)
         console.print("  [red]会话缺少 thread_id，无法恢复执行现场[/red]")
         return None
 
@@ -60,8 +76,15 @@ def cmd_resume(
     interrupt_requests: list[dict] = []
     restored_from_checkpoint = False
     try:
+        logger.info("resume: loading checkpoint thread_id=%s", thread_id)
         snapshot = graph.get_state(config)
         snapshot_values = getattr(snapshot, "values", None) or {}
+        logger.info(
+            "resume: checkpoint loaded thread_id=%s has_values=%s next=%s",
+            thread_id,
+            bool(snapshot_values),
+            tuple(getattr(snapshot, "next", ()) or ()),
+        )
         if snapshot_values:
             if _is_pending_tool_execution(snapshot):
                 snapshot = _recover_interrupted_tool_execution(
@@ -72,20 +95,33 @@ def cmd_resume(
                 )
                 snapshot_values = getattr(snapshot, "values", None) or {}
             interrupt_requests = _extract_interrupt_requests(snapshot)
+            logger.info(
+                "resume: checkpoint interrupt_requests=%d awaiting_approval=%s",
+                len(interrupt_requests),
+                _has_awaiting_approval(snapshot),
+            )
             if _has_awaiting_approval(snapshot) and not interrupt_requests:
+                logger.info("resume: abort inconsistent awaiting approval thread_id=%s", thread_id)
                 console.print("  [red]待审批工具状态不完整：存在 awaiting_approval，但没有可恢复的审批请求[/red]")
                 return None
             restored_from_checkpoint = True
-            restored_messages = snapshot_values.get("message") or messages
+            restored_messages = snapshot_values.get("messages") or messages
             session.stats.last_input_tokens = session.estimate_messages_tokens(restored_messages)
-    except Exception:
+            logger.info(
+                "resume: checkpoint restored messages=%d estimated_tokens=%d",
+                len(restored_messages),
+                session.stats.last_input_tokens,
+            )
+    except Exception as exc:
+        logger.warning("resume: checkpoint load failed thread_id=%s error=%s", thread_id, exc)
         snapshot = None
 
     if not restored_from_checkpoint:
+        logger.info("resume: abort missing persisted checkpoint thread_id=%s", thread_id)
         console.print("  [red]未找到持久化 checkpoint，当前 /resume 仅支持执行态恢复[/red]")
         return None
 
-    session._resumed_from = filepath
+    session.resume_from(filepath)
 
     for notice in _build_resume_consistency_notices(
         snapshot=snapshot,
@@ -104,13 +140,20 @@ def cmd_resume(
             console.print("  [dim]已恢复到挂起执行现场，将继续处理未完成的审批/中断。[/dim]")
         console.print()
 
+    logger.info(
+        "resume: completed thread_id=%s filepath=%s interrupt_requests=%d next=%s",
+        thread_id,
+        filepath,
+        len(interrupt_requests),
+        tuple(getattr(snapshot, "next", ()) or ()) if snapshot else (),
+    )
     return thread_id
 
 
 def _is_pending_tool_execution(snapshot: Any) -> bool:
-    """判断 checkpoint 是否停在未完成的 tool_execution。"""
+    """判断 checkpoint 是否停在未完成的 tools 节点。"""
     next_nodes = getattr(snapshot, "next", ()) or ()
-    return "tool_execution" in next_nodes
+    return "tools" in next_nodes or "tool_execution" in next_nodes
 
 
 def _has_awaiting_approval(snapshot: Any) -> bool:
@@ -140,7 +183,7 @@ def _build_resume_consistency_notices(
     """构建 checkpoint / transcript 一致性提示。"""
     notices: list[str] = []
     snapshot_values = getattr(snapshot, "values", None) or {}
-    checkpoint_messages = snapshot_values.get("message") or []
+    checkpoint_messages = snapshot_values.get("messages") or []
 
     if checkpoint_messages and not transcript_messages:
         notices.append("恢复以 checkpoint 为准；本地 transcript 缺失，历史展示可能不完整。")
@@ -175,8 +218,14 @@ def _recover_interrupted_tool_execution(
             })
 
     if not interrupted_calls:
+        logger.info("resume: no interrupted tool execution to recover")
         return snapshot
 
+    logger.info(
+        "resume: marking interrupted tool calls count=%d ids=%s",
+        len(interrupted_calls),
+        [tc.get("call_id", "") for tc in interrupted_calls],
+    )
     interrupted_messages = [
         ToolMessage(
             content="[工具执行中断，等待恢复策略处理]",
@@ -189,12 +238,11 @@ def _recover_interrupted_tool_execution(
     graph.update_state(
         config,
         {
-            "message": interrupted_messages,
+            "messages": interrupted_messages,
             "pending_tool_calls": [],
-            "completed_tool_calls": [],
             "should_continue": False,
         },
-        as_node="observation",
+        as_node="tools",
     )
     console.print(
         f"  [yellow]检测到 {len(interrupted_calls)} 个未完成工具执行，"
@@ -294,14 +342,25 @@ def _render_resumed_history(console: Console, records: list[dict]) -> None:
                 console.print(line)
             elif role == "assistant":
                 content = record.get("content", "")
+                reasoning_content = record.get("reasoning_content", "")
+                if reasoning_content:
+                    rendered_thought = str(reasoning_content).replace("\n", "\n    ")
+                    console.print()
+                    console.print("  💭 ", end="", style="dim italic")
+                    console.print(
+                        rendered_thought,
+                        style="dim italic",
+                        end="",
+                        highlight=False,
+                        markup=False,
+                    )
+                    console.print()
                 if content:
+                    indented = content.replace("\n", "\n  ")
                     console.print()
-                    console.print(content, highlight=False, markup=False)
+                    console.print("[bold white]⏺[/bold white] ", end="")
+                    console.print(indented, highlight=False, markup=False)
                     console.print()
-            elif role == "tool":
-                name = record.get("name", "?")
-                content = truncate(record.get("content", ""), 120)
-                console.print(f"  [green]✓[/green] [dim]{name} → {content}[/dim]")
 
         elif rtype == "thought":
             text = record.get("text", "")
@@ -313,13 +372,20 @@ def _render_resumed_history(console: Console, records: list[dict]) -> None:
             args = record.get("arguments", {})
             display = TOOL_DISPLAY.get(name, name)
             file_path = args.get("file_path")
+            status = record.get("status", "")
+
+            # 向后看：找到对应的 tool_complete 确定颜色
+            # 回放时无法提前知道状态，先用默认绿色，由 tool_complete 独立渲染状态
+            dot_style = "bold green"
 
             if file_path:
-                console.print(f"\n  [bold cyan]⏺ {display}[/bold cyan]({file_path})")
+                console.print(
+                    f"\n[{dot_style}]⏺[/{dot_style}] [bold]{display}[/bold]({file_path})"
+                )
             else:
                 args_brief = ", ".join(f"{k}={truncate(v)}" for k, v in args.items())
                 console.print(
-                    f"\n  [bold cyan]⏺ {display}[/bold cyan]"
+                    f"\n[{dot_style}]⏺[/{dot_style}] [bold]{display}[/bold]"
                     f"[dim]({args_brief})[/dim]"
                 )
 
@@ -352,20 +418,15 @@ def _render_resumed_history(console: Console, records: list[dict]) -> None:
         elif rtype == "tool_complete":
             name = record.get("tool_name", "?")
             status = record.get("status", "")
-            had_diff = record.get("had_diff", False)
+            display = record.get("display", "")
+            error_msg = record.get("error_msg", "")
 
-            if had_diff:
-                if status == "error":
-                    err = record.get("error_msg", "unknown")
-                    console.print(f"  [red]✗[/red] [dim]{name} 失败: {err}[/dim]")
-            elif status == "success":
-                result_preview = truncate(record.get("result", ""), 120)
-                console.print(f"  [green]✓[/green] [dim]{name} → {result_preview}[/dim]")
-            elif status == "error":
-                err = record.get("error_msg", "unknown")
-                console.print(f"  [red]✗[/red] [dim]{name} 失败: {err}[/dim]")
+            if status == "error":
+                console.print(f"  [red]{error_msg or 'Error'}[/red]")
             elif status == "cancelled":
-                console.print(f"  [yellow]⊘[/yellow] [dim]{name} 已取消[/dim]")
+                console.print(f"  [yellow]已取消[/yellow]")
+            elif display:
+                console.print(f"  [dim]{display}[/dim]")
 
     console.print()
     console.print("  [dim]─── 继续对话 ───[/dim]")

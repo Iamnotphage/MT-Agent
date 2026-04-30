@@ -1,7 +1,13 @@
 from unittest.mock import patch
 
+from langchain_core.messages import AIMessage
+
 from core.event_bus import EventType
-from core.nodes.human_approval import create_human_approval_node, _parse_response
+from core.nodes.human_approval import (
+    create_human_approval_node,
+    post_approval_route,
+    _parse_response,
+)
 
 
 def _make_tc(tool_name: str, call_id: str, status: str = "awaiting_approval") -> dict:
@@ -50,6 +56,18 @@ class TestHumanApprovalNode:
         """拒绝 → awaiting_approval 变为 cancelled"""
         node = create_human_approval_node(event_bus)
         state = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "run_command",
+                        "args": {},
+                        "id": "call_1",
+                        "type": "tool_call",
+                    }],
+                    id="msg_1",
+                )
+            ],
             "pending_tool_calls": [_make_tc("run_command", "call_1")],
             "approval_requests": [{"call_id": "call_1", "tool_name": "run_command"}],
             "turn_count": 1,
@@ -58,6 +76,9 @@ class TestHumanApprovalNode:
         result = node(state)
 
         assert result["pending_tool_calls"][0]["status"] == "cancelled"
+        assert result["messages"][0].id == "msg_1"
+        assert result["messages"][0].tool_calls == []
+        assert result["messages"][0].content == "[用户拒绝了工具调用]"
 
     @patch(
         "core.nodes.human_approval.interrupt",
@@ -67,6 +88,16 @@ class TestHumanApprovalNode:
         """逐条决策: call_1 放行, call_2 拒绝"""
         node = create_human_approval_node(event_bus)
         state = {
+            "messages": [
+                AIMessage(
+                    content="让我处理这些改动。",
+                    tool_calls=[
+                        {"name": "write_file", "args": {}, "id": "call_1", "type": "tool_call"},
+                        {"name": "ssh_command", "args": {}, "id": "call_2", "type": "tool_call"},
+                    ],
+                    id="msg_2",
+                )
+            ],
             "pending_tool_calls": [
                 _make_tc("write_file", "call_1"),
                 _make_tc("ssh_command", "call_2"),
@@ -83,6 +114,7 @@ class TestHumanApprovalNode:
         statuses = {tc["call_id"]: tc["status"] for tc in result["pending_tool_calls"]}
         assert statuses["call_1"] == "pending"
         assert statuses["call_2"] == "cancelled"
+        assert [tc["id"] for tc in result["messages"][0].tool_calls] == ["call_1"]
 
     @patch(
         "core.nodes.human_approval.interrupt",
@@ -142,6 +174,18 @@ class TestHumanApprovalNode:
         """非 dict 响应 → 兜底拒绝"""
         node = create_human_approval_node(event_bus)
         state = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "run_command",
+                        "args": {},
+                        "id": "call_1",
+                        "type": "tool_call",
+                    }],
+                    id="msg_3",
+                )
+            ],
             "pending_tool_calls": [_make_tc("run_command", "call_1")],
             "approval_requests": [{"call_id": "call_1", "tool_name": "run_command"}],
             "turn_count": 0,
@@ -159,6 +203,18 @@ class TestHumanApprovalNode:
         """响应中缺少 call_id → 该工具视为拒绝"""
         node = create_human_approval_node(event_bus)
         state = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "run_command",
+                        "args": {},
+                        "id": "call_1",
+                        "type": "tool_call",
+                    }],
+                    id="msg_4",
+                )
+            ],
             "pending_tool_calls": [_make_tc("run_command", "call_1")],
             "approval_requests": [{"call_id": "call_1", "tool_name": "run_command"}],
             "turn_count": 0,
@@ -167,6 +223,40 @@ class TestHumanApprovalNode:
         result = node(state)
 
         assert result["pending_tool_calls"][0]["status"] == "cancelled"
+
+    @patch(
+        "core.nodes.human_approval.interrupt",
+        return_value={"call_1": False, "call_2": False},
+    )
+    def test_deny_does_not_emit_fake_tool_messages(self, _mock_interrupt, event_bus):
+        node = create_human_approval_node(event_bus)
+        state = {
+            "messages": [
+                AIMessage(
+                    content="先写文件再跑命令。",
+                    tool_calls=[
+                        {"name": "write_file", "args": {}, "id": "call_1", "type": "tool_call"},
+                        {"name": "run_command", "args": {}, "id": "call_2", "type": "tool_call"},
+                    ],
+                    id="msg_5",
+                )
+            ],
+            "pending_tool_calls": [
+                _make_tc("write_file", "call_1"),
+                _make_tc("run_command", "call_2"),
+            ],
+            "approval_requests": [
+                {"call_id": "call_1", "tool_name": "write_file"},
+                {"call_id": "call_2", "tool_name": "run_command"},
+            ],
+            "turn_count": 0,
+        }
+
+        result = node(state)
+
+        assert len(result["messages"]) == 1
+        assert isinstance(result["messages"][0], AIMessage)
+        assert result["messages"][0].tool_calls == []
 
 
 class TestParseResponse:
@@ -186,3 +276,23 @@ class TestParseResponse:
     def test_non_dict_fallback(self):
         reqs = [{"call_id": "a"}]
         assert _parse_response("invalid", reqs) == {"a": False}
+
+
+class TestPostApprovalRoute:
+
+    def test_routes_to_tools_when_pending_call_exists(self):
+        state = {
+            "pending_tool_calls": [
+                _make_tc("write_file", "call_1", status="pending"),
+                _make_tc("run_command", "call_2", status="cancelled"),
+            ]
+        }
+        assert post_approval_route(state) == "tools"
+
+    def test_routes_to_reasoning_when_all_calls_cancelled(self):
+        state = {
+            "pending_tool_calls": [
+                _make_tc("write_file", "call_1", status="cancelled"),
+            ]
+        }
+        assert post_approval_route(state) == "reasoning"

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
+from pathlib import Path
 
 from rich.console import Console
 
@@ -37,11 +39,11 @@ class App:
             runtime = create_agent_runtime()
         except Exception as e:
             self.console.print(f"  [red]Agent 初始化失败:[/red] {e}")
-            self.console.print("  [dim]请检查 config.json 或环境变量配置[/dim]\n")
+            self.console.print("  [dim]请检查 .env文件或环境变量配置[/dim]\n")
             return
 
         self.console.print(f"  [dim]工作目录  {runtime.workspace}[/dim]")
-        self.console.print(f"  [dim]已注册工具  {', '.join(runtime.registry.names)}[/dim]")
+        self.console.print(f"  [dim]已注册工具  {', '.join(t.name for t in runtime.tools)}[/dim]")
 
         # Context & Memory 加载信息
         cm = runtime.context_manager
@@ -67,11 +69,42 @@ class App:
             repl.close()
 
 
+def build_default_log_file_path(base_dir: str | None = None, now: datetime | None = None) -> str:
+    root = Path(base_dir or os.getcwd())
+    ts = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    return str(root / "logs" / f"mt-agent-{ts}.log")
+
+
 def main() -> int:
-    logging.basicConfig(
-        level=os.environ.get("LOG_LEVEL", "WARNING").upper(),
-        format="%(name)s %(levelname)s: %(message)s",
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="MT-Agent")
+    parser.add_argument(
+        "--log-level",
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="日志级别 (默认: WARNING，使用 INFO 查看工具执行日志)",
     )
+    args = parser.parse_args()
+
+    effective_level = args.log_level or "WARNING"
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+
+    if args.log_level is not None:
+        log_path = build_default_log_file_path()
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+
+    logging.basicConfig(
+        level=getattr(logging, effective_level),
+        format="[%(asctime)s.%(msecs)03d] [%(name)s] %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=handlers,
+    )
+    if args.log_level is not None:
+        logging.getLogger(__name__).info("Log file: %s", log_path)
+
     app = App()
     try:
         app.run()

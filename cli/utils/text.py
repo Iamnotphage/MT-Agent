@@ -11,13 +11,22 @@ from typing import Any
 PROMPT_STYLE = "#847ACE"
 PROMPT_SYMBOL = "❯"
 RISK_STYLE = {"low": "green", "medium": "yellow", "high": "red bold"}
-TOOL_DISPLAY = {"write_file": "Write", "read_file": "Read", "ls": "Ls"}
+TOOL_DISPLAY = {
+    "read_file": "Read",
+    "write_file": "Write",
+    "edit_file": "Edit",
+    "ls": "Ls",
+    "glob": "Glob",
+    "grep": "Grep",
+    "save_memory": "Memory",
+}
 BG_USER = "on #252530"
 
 COMMANDS = [
     ("/clear",   "清屏"),
     ("/new",     "开启新会话 (清空对话历史)"),
     ("/resume",  "恢复历史会话"),
+    ("/compact", "手动压缩上下文"),
     ("/context", "查看/刷新上下文 (show|reload)"),
     ("/memory",  "管理记忆 (list|add|remove)"),
     ("/help",    "显示帮助信息"),
