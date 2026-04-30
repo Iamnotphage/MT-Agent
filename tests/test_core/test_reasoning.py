@@ -199,11 +199,8 @@ class TestReasoningNode:
             streamed_messages = llm.stream.call_args.args[0]
             assert streamed_messages[1].content.startswith("<compact_boundary ")
             assert "conversation_history_summary" in streamed_messages[2].content
-            assert streamed_messages[-1].content == "u4"
-            assert result["messages"][0].id == "m1"
-            assert result["messages"][1].id in {"m2", "m3"}
-            assert result["messages"][-3].content.startswith("<compact_boundary ")
-            assert "conversation_history_summary" in result["messages"][-2].content
+            # full compact: LLM 只看到 boundary + summary，不再包含 kept_messages
+            assert len(streamed_messages) == 3  # system + boundary + summary
         finally:
             CONTEXT_CONFIG["token_limit"] = old_limit
             CONTEXT_CONFIG["summary_reserved_tokens"] = old_reserved
@@ -457,6 +454,28 @@ class TestReasoningNode:
         first_assistant = streamed_messages[-3]
         assert isinstance(first_assistant, AIMessage)
         assert first_assistant.additional_kwargs["reasoning_content"] == "fallback thinking"
+
+    def test_prepare_history_preserves_reasoning_for_leading_tool_segment(self, event_bus, mock_llm_text):
+        """leading AIMessage+ToolMessages（compact 后残留在最前面）应保留 reasoning_content。"""
+        node = create_reasoning_node(mock_llm_text, event_bus)
+        history = [
+            AIMessage(
+                content="先列文件",
+                tool_calls=[{"name": "glob", "args": {"pattern": "**/*.py"}, "id": "call_1", "type": "tool_call"}],
+                additional_kwargs={"reasoning_content": "leading tool reasoning"},
+            ),
+            ToolMessage(content="result", tool_call_id="call_1", name="glob"),
+            AIMessage(content="总结", additional_kwargs={"reasoning_content": "summary reasoning"}),
+            HumanMessage(content="继续"),
+        ]
+        state = {"messages": history, "turn_count": 1}
+
+        node(state)
+
+        streamed_messages = mock_llm_text.stream.call_args.args[0]
+        # 跳过 system prompt，找到第一个 AIMessage
+        first_assistant = next(m for m in streamed_messages if isinstance(m, AIMessage))
+        assert first_assistant.additional_kwargs["reasoning_content"] == "leading tool reasoning"
 
     def test_compacted_history_preserves_reasoning_content(self, event_bus, mock_llm_text):
         node = create_reasoning_node(mock_llm_text, event_bus)

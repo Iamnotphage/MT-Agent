@@ -430,6 +430,8 @@ def _prepare_history_for_model(
     if not human_indices:
         segments.append((0, len(messages)))
     else:
+        if human_indices[0] > 0:
+            segments.append((0, human_indices[0]))
         for pos, start_idx in enumerate(human_indices):
             end_idx = human_indices[pos + 1] if pos + 1 < len(human_indices) else len(messages)
             segments.append((start_idx, end_idx))

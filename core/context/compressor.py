@@ -22,12 +22,10 @@ from langchain_core.messages import (
 )
 from core.context.budget import estimate_message_tokens
 from core.context.message_invariants import (
-    find_compaction_working_start,
-    find_safe_split_index,
     is_compact_boundary_message,
     is_compact_summary_message,
 )
-from prompts.compression_prompt import COMPACT_SYSTEM_PROMPT
+from prompts.compression_prompt import build_compact_prompt
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
@@ -61,52 +59,34 @@ class ContextCompressor:
             return False
         return last_input_tokens >= self._token_limit * self._threshold
 
-    def compress(self, messages: list[BaseMessage], *, reason: str = "auto") -> CompressResult | None:
-        """执行压缩。"""
+    def compress(self, messages: list[BaseMessage], *, reason: str = "auto", custom_instructions: str | None = None) -> CompressResult | None:
+        """执行压缩。full compact 总结全部消息，checkpoint state 只保留 boundary + summary。"""
         if len(messages) < 4:
             return None
 
-        split_idx = self._find_split_point(messages)
-        if split_idx <= 0:
-            return None
+        logger.info("Compressing %d messages", len(messages))
 
-        working_start = find_compaction_working_start(messages)
-        if split_idx <= working_start:
-            return None
-
-        preserved_prefix = messages[:working_start]
-        old_messages = messages[working_start:split_idx]
-        kept_messages = messages[split_idx:]
-
-        # 清理保留消息中的 reasoning_content：只保留涉及工具调用的 segment 中的 reasoning_content
-        kept_messages = _clean_reasoning_content(kept_messages)
-
-        logger.info(
-            "Compressing %d/%d messages (split at index %d)",
-            len(old_messages), len(messages), split_idx,
-        )
-
-        summary_text = self._generate_summary(old_messages)
+        summary_text = self._generate_summary(messages, custom_instructions=custom_instructions)
         if not summary_text:
             logger.warning("Compression LLM returned empty summary, skipping")
             return None
 
-        remove_ids = [msg.id for msg in old_messages if msg.id]
-        pre_tokens = estimate_message_tokens(old_messages)
+        remove_ids = [msg.id for msg in messages if msg.id]
+        pre_tokens = estimate_message_tokens(messages)
         summary_msg = self.build_summary_message(summary_text)
         boundary_msg = self.build_compact_boundary_message(
             pre_tokens=pre_tokens,
             post_tokens=0,
             reason=reason,
         )
-        compressed_messages = [*preserved_prefix, boundary_msg, summary_msg, *kept_messages]
+        compressed_messages = [boundary_msg, summary_msg]
         post_tokens = estimate_message_tokens(compressed_messages)
         boundary_msg = self.build_compact_boundary_message(
             pre_tokens=pre_tokens,
             post_tokens=post_tokens,
             reason=reason,
         )
-        compressed_messages = [*preserved_prefix, boundary_msg, summary_msg, *kept_messages]
+        compressed_messages = [boundary_msg, summary_msg]
 
         return CompressResult(
             remove_message_ids=remove_ids,
@@ -114,9 +94,9 @@ class ContextCompressor:
             summary_message=summary_msg,
             summary_text=summary_text,
             compressed_messages=compressed_messages,
-            removed_count=len(old_messages),
-            kept_count=len(messages) - split_idx + len(preserved_prefix),
-            split_index=split_idx,
+            removed_count=len(messages),
+            kept_count=0,
+            split_index=len(messages),
             pre_tokens=pre_tokens,
             post_tokens=post_tokens,
             reason=reason,
@@ -147,15 +127,7 @@ class ContextCompressor:
             ),
         )
 
-    def _find_split_point(self, messages: list[BaseMessage]) -> int:
-        split_idx = find_safe_split_index(
-            messages,
-            min_keep_tokens=self._preserve_min_tokens,
-            max_keep_tokens=self._preserve_max_tokens,
-        )
-        return split_idx or 0
-
-    def _generate_summary(self, old_messages: list[BaseMessage]) -> str:
+    def _generate_summary(self, old_messages: list[BaseMessage], *, custom_instructions: str | None = None) -> str:
         conversation_text = self._serialize_messages(old_messages)
 
         # 限制输入大小，避免压缩本身超限
@@ -175,7 +147,7 @@ class ContextCompressor:
             )
 
         compress_messages = [
-            SystemMessage(content=COMPACT_SYSTEM_PROMPT),
+            SystemMessage(content=build_compact_prompt(custom_instructions)),
             HumanMessage(
                 content=(
                     "Create a detailed compact summary of the following conversation history. "
@@ -286,15 +258,19 @@ def _extract_compact_summary(text: str) -> str:
 
 def _clean_reasoning_content(messages: list[BaseMessage]) -> list[BaseMessage]:
     """只保留涉及工具调用的 segment 中的 reasoning_content。"""
+    from core.context.session_memory import is_session_memory_summary_message
+
     if not messages:
         return []
 
-    # 划分 segment（两个 HumanMessage 之间）
+    # 划分 segment（两个 HumanMessage 之间，以及 leading 段）
     human_indices = [idx for idx, msg in enumerate(messages) if isinstance(msg, HumanMessage)]
     segments: list[tuple[int, int]] = []
     if not human_indices:
         segments.append((0, len(messages)))
     else:
+        if human_indices[0] > 0:
+            segments.append((0, human_indices[0]))
         for pos, start_idx in enumerate(human_indices):
             end_idx = human_indices[pos + 1] if pos + 1 < len(human_indices) else len(messages)
             segments.append((start_idx, end_idx))
@@ -308,7 +284,7 @@ def _clean_reasoning_content(messages: list[BaseMessage]) -> list[BaseMessage]:
             for msg in segment
         )
         has_compaction_marker = any(
-            is_compact_boundary_message(msg) or is_compact_summary_message(msg)
+            is_compact_boundary_message(msg) or is_compact_summary_message(msg) or is_session_memory_summary_message(msg)
             for msg in segment
         )
         if has_tool_calls or has_compaction_marker:

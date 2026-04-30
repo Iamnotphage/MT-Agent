@@ -49,3 +49,10 @@ def test_context_status_falls_back_to_token_limit_when_effective_limit_missing(t
     status = repl._context_status()
 
     assert "99% left" in status
+
+
+def test_commands_list_includes_compact():
+    from cli.utils.text import COMMANDS
+
+    names = [name for name, _ in COMMANDS]
+    assert "/compact" in names

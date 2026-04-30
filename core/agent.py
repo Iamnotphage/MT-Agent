@@ -36,6 +36,8 @@ class AgentRuntime:
     context_manager: ContextManager
     memory_manager: MemoryManager
     session: SessionRecorder
+    compressor: ContextCompressor | None = None
+    session_memory_manager: SessionMemoryManager | None = None
     checkpoint_manager: AbstractContextManager[Any] | None = None
 
 
@@ -124,5 +126,7 @@ def create_agent_runtime(
         context_manager=ctx_manager,
         memory_manager=memory_manager,
         session=session,
+        compressor=compressor,
+        session_memory_manager=session_memory_manager,
         checkpoint_manager=checkpoint_manager,
     )

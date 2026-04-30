@@ -19,6 +19,7 @@ from rich.text import Text
 
 from prompt_toolkit.history import InMemoryHistory
 
+from cli.commands.compact import cmd_compact
 from cli.commands.context import cmd_context
 from cli.commands.memory import cmd_memory
 from cli.commands.resume import cmd_resume
@@ -309,6 +310,10 @@ class Repl:
                 cmd_context(self.console, self.runtime.context_manager, parts[1:])
             case "/memory":
                 cmd_memory(self.console, self.runtime.memory_manager, parts[1:])
+            case "/compact":
+                # 用 partition 保留多词指令原文
+                _, _, tail = cmd.partition(" ")
+                cmd_compact(self.console, self.runtime, tail.strip())
             case _:
                 self.console.print(f"  [red]未知命令:[/red] {cmd}")
                 self.console.print("  [dim]输入 /help 查看可用命令[/dim]")
@@ -324,6 +329,7 @@ class Repl:
             ("/clear", "清屏"),
             ("/new", "开启新会话 (清空对话历史)"),
             ("/resume", "浏览并恢复历史会话"),
+            ("/compact [instructions]", "手动压缩上下文；无参数优先 session memory，有参数直接 full compact"),
             ("/context show", "显示当前已加载的上下文"),
             ("/context reload", "重新加载上下文文件"),
             ("/memory list", "列出所有已保存的记忆"),

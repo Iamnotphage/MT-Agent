@@ -110,3 +110,14 @@ When you are using compact - please focus on test output and code changes. Inclu
 """
 
 COMPACT_SYSTEM_PROMPT = NO_TOOLS_PREAMBLE + BASE_COMPACT_PROMPT
+
+
+def build_compact_prompt(custom_instructions: str | None = None) -> str:
+    """Build the full compact system prompt, optionally appending user instructions."""
+    if not custom_instructions:
+        return COMPACT_SYSTEM_PROMPT
+    return (
+        f"{COMPACT_SYSTEM_PROMPT}\n\n"
+        "## Compact Instructions\n"
+        f"{custom_instructions.strip()}\n"
+    )

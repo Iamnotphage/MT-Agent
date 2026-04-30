@@ -26,6 +26,7 @@ COMMANDS = [
     ("/clear",   "清屏"),
     ("/new",     "开启新会话 (清空对话历史)"),
     ("/resume",  "恢复历史会话"),
+    ("/compact", "手动压缩上下文"),
     ("/context", "查看/刷新上下文 (show|reload)"),
     ("/memory",  "管理记忆 (list|add|remove)"),
     ("/help",    "显示帮助信息"),

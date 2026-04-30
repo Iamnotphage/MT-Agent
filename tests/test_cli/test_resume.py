@@ -384,3 +384,28 @@ def test_cmd_resume_restores_full_compact_summary(monkeypatch, tmp_path):
     thread_id = resume_mod.cmd_resume(console, recorder, graph)
 
     assert thread_id == "thread-restore"
+
+
+def test_build_resume_messages_recognizes_compact_summary_transcript(tmp_path):
+    """transcript fallback 能正确识别 <conversation_history_summary> 包装的摘要。"""
+    recorder, _ = _make_recorder(tmp_path)
+    recorder.record({
+        "type": "compact_boundary",
+        "reason": "manual",
+        "pre_tokens": 200,
+        "post_tokens": 50,
+    })
+    recorder.record({
+        "type": "transcript_message",
+        "role": "system",
+        "content": "<conversation_history_summary>\nDetailed summary of work done.\n</conversation_history_summary>",
+        "name": "compact_summary",
+    })
+    filepath = recorder.flush()
+
+    messages = recorder.build_resume_messages(filepath)
+
+    assert len(messages) == 2
+    assert messages[0].content.startswith("<compact_boundary ")
+    assert messages[1].content.startswith("<conversation_history_summary>")
+    assert "Detailed summary of work done." in messages[1].content
