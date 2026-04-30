@@ -226,3 +226,16 @@ def test_cmd_compact_prints_success(tmp_path):
     assert "full compact" in rendered
     assert "100" in rendered  # pre_tokens
     assert "50" in rendered   # post_tokens
+
+
+def test_cmd_compact_without_session_memory_falls_back_to_full_compact(tmp_path):
+    """session_memory_manager=None 时 /compact 直接走 full compact。"""
+    compressor = _make_compressor()
+    runtime = _make_runtime(tmp_path, compressor=compressor, session_memory_manager=None)
+    console = Console(record=True, width=100)
+
+    cmd_compact(console, runtime, "")
+
+    compressor.compress.assert_called_once()
+    rendered = console.export_text()
+    assert "full compact" in rendered

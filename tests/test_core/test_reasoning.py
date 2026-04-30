@@ -605,6 +605,52 @@ class TestReasoningNode:
         assert any("session_memory_summary" in getattr(msg, "content", "") for msg in result["messages"] if hasattr(msg, "content"))
         assert received[0].data["trigger_reason"] == "session_memory"
 
+    def test_auto_compact_falls_back_to_full_compact_when_session_memory_disabled(self, event_bus, mock_llm_text):
+        """session_memory_manager=None 时 auto-compact 直接走 full compact。"""
+        old_limit = CONTEXT_CONFIG["token_limit"]
+        old_reserved = CONTEXT_CONFIG["summary_reserved_tokens"]
+        old_buffer = CONTEXT_CONFIG["autocompact_buffer_tokens"]
+        CONTEXT_CONFIG["token_limit"] = 50
+        CONTEXT_CONFIG["summary_reserved_tokens"] = 20
+        CONTEXT_CONFIG["autocompact_buffer_tokens"] = 20
+        stats = SessionStats(last_input_tokens=80)
+        compressor = MagicMock()
+        compressor.compress.return_value = MagicMock(
+            summary_text="compressed",
+            summary_message=HumanMessage(content="<conversation_history_summary>\ncompressed\n</conversation_history_summary>"),
+            boundary_message=HumanMessage(content='<compact_boundary pre_tokens="100" post_tokens="50" reason="auto" />'),
+            compressed_messages=[],
+            remove_message_ids=["m1", "m2", "m3", "m4"],
+            pre_tokens=100,
+            post_tokens=50,
+            reason="auto",
+        )
+
+        try:
+            node = create_reasoning_node(
+                mock_llm_text,
+                event_bus,
+                session_stats=stats,
+                compressor=compressor,
+                # 不传 session_memory_manager 和 session_memory_worker
+            )
+            state = {
+                "messages": [
+                    HumanMessage(content="u1", id="m1"),
+                    HumanMessage(content="u2", id="m2"),
+                    HumanMessage(content="u3", id="m3"),
+                    HumanMessage(content="u4", id="m4"),
+                ],
+                "turn_count": 1,
+            }
+            node(state)
+        finally:
+            CONTEXT_CONFIG["token_limit"] = old_limit
+            CONTEXT_CONFIG["summary_reserved_tokens"] = old_reserved
+            CONTEXT_CONFIG["autocompact_buffer_tokens"] = old_buffer
+
+        compressor.compress.assert_called_once()
+
 
 class TestShouldUseTools:
     """条件路由函数测试"""

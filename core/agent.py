@@ -38,6 +38,7 @@ class AgentRuntime:
     session: SessionRecorder
     compressor: ContextCompressor | None = None
     session_memory_manager: SessionMemoryManager | None = None
+    session_memory_worker: SessionMemoryExtractWorker | None = None
     checkpoint_manager: AbstractContextManager[Any] | None = None
 
 
@@ -93,13 +94,17 @@ def create_agent_runtime(
         preserve_min_tokens=CONTEXT_CONFIG.get("compression_preserve_min_tokens", 10000),
         preserve_max_tokens=CONTEXT_CONFIG.get("compression_preserve_max_tokens", 40000),
     )
-    session_memory_manager = SessionMemoryManager(
-        working_directory=ws,
-        config=CONTEXT_CONFIG,
-        session_id=session.stats.session_id,
-        llm=compressor_llm,
-    )
-    session_memory_worker = SessionMemoryExtractWorker(session_memory_manager, event_bus)
+    session_memory_manager: SessionMemoryManager | None = None
+    session_memory_worker: SessionMemoryExtractWorker | None = None
+
+    if CONTEXT_CONFIG.get("enable_session_memory_compact", False):
+        session_memory_manager = SessionMemoryManager(
+            working_directory=ws,
+            config=CONTEXT_CONFIG,
+            session_id=session.stats.session_id,
+            llm=compressor_llm,
+        )
+        session_memory_worker = SessionMemoryExtractWorker(session_memory_manager, event_bus)
 
     checkpoint_path = session.get_checkpoint_path()
     checkpoint_manager = SqliteSaver.from_conn_string(str(checkpoint_path))
@@ -128,5 +133,6 @@ def create_agent_runtime(
         session=session,
         compressor=compressor,
         session_memory_manager=session_memory_manager,
+        session_memory_worker=session_memory_worker,
         checkpoint_manager=checkpoint_manager,
     )

@@ -38,6 +38,8 @@ CONTEXT = {
     "compression_preserve_min_tokens": 10_000,
     # 后续消息保留区的最大 token 目标
     "compression_preserve_max_tokens": 40_000,
+    # session memory compact 功能开关（默认关闭，auto-compact 和 /compact 直接走 full compact）
+    "enable_session_memory_compact": False,
 }
 
 
