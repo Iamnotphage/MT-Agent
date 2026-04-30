@@ -54,6 +54,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     parser.add_argument("--repos_root", default=DEFAULT_REPOS_ROOT)
     parser.add_argument(
+        "--offline_repos",
+        action="store_true",
+        help="Require all repos and commits to already exist locally; never clone or fetch.",
+    )
+    parser.add_argument(
         "--repo_source",
         default="https://github.com/swe-bench-repos",
         help="Base URL for mirrored repositories",
@@ -137,7 +142,7 @@ def run_git_with_retry(cmd: list[str], cwd: Path | None = None, retries: int = D
     raise last_error
 
 
-def ensure_repo(instance: dict, repos_root: Path, repo_source: str) -> Path:
+def ensure_repo(instance: dict, repos_root: Path, repo_source: str, offline_repos: bool) -> Path:
     repo_key = instance["repo"].replace("/", "__")
     repo_dir = repos_root / repo_key
     repo_url = f"{repo_source}/{repo_key}.git"
@@ -145,12 +150,20 @@ def ensure_repo(instance: dict, repos_root: Path, repo_source: str) -> Path:
 
     repos_root.mkdir(parents=True, exist_ok=True)
     if not repo_dir.exists():
+        if offline_repos:
+            raise RuntimeError(
+                f"Missing local repo: {repo_dir}. Run the prefetch script first."
+            )
         log(f"[repo] cloning {repo_url} -> {repo_dir}")
         run_git_with_retry(["git", "clone", repo_url, str(repo_dir)])
     else:
         if has_commit(repo_dir, base_commit):
             log(f"[repo] found base commit locally, skip fetch: {base_commit}")
         else:
+            if offline_repos:
+                raise RuntimeError(
+                    f"Missing base commit {base_commit} in {repo_dir}. Run the prefetch script first."
+                )
             log(f"[repo] refreshing {repo_dir}")
             run_git_with_retry(["git", "fetch", "--all", "--tags"], cwd=repo_dir)
 
@@ -272,7 +285,7 @@ def main() -> int:
     for idx, instance in enumerate(instances, start=1):
         instance_id = instance["instance_id"]
         log(f"[run] [{idx}/{len(instances)}] instance={instance_id}")
-        repo_dir = ensure_repo(instance, repos_root, args.repo_source)
+        repo_dir = ensure_repo(instance, repos_root, args.repo_source, args.offline_repos)
         prompt = build_prompt(instance)
         final_text, patch = run_agent_on_instance(repo_dir, prompt)
 

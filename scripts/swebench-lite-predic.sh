@@ -18,6 +18,7 @@ MODEL_NAME_OR_PATH="mt-agent-lite"
 REPOS_ROOT=".swebench/repos"
 REPO_SOURCE="https://github.com/swe-bench-repos"
 OUTPUT_PATH="predictions/mt-agent-lite.jsonl"
+OFFLINE_REPOS=1
 
 # ---------------------------------------------------------------------------
 # Command assembly
@@ -33,9 +34,14 @@ CMD=(
   --split "${SPLIT}"
   --output "${OUTPUT_PATH}"
   --repos_root "${REPOS_ROOT}"
-  --repo_source "${REPO_SOURCE}"
   --model_name_or_path "${MODEL_NAME_OR_PATH}"
 )
+
+if [[ ${OFFLINE_REPOS} -eq 1 ]]; then
+  CMD+=(--offline_repos)
+else
+  CMD+=(--repo_source "${REPO_SOURCE}")
+fi
 
 if [[ ${LIMIT} -gt 0 ]]; then
   CMD+=(--limit "${LIMIT}")
@@ -50,6 +56,7 @@ echo "[predict] dataset: ${DATASET_NAME}"
 echo "[predict] split: ${SPLIT}"
 echo "[predict] limit: ${LIMIT}"
 echo "[predict] output: ${OUTPUT_PATH}"
+echo "[predict] offline repos: ${OFFLINE_REPOS}"
 echo "[predict] command: ${CMD[*]}"
 
 "${CMD[@]}"
