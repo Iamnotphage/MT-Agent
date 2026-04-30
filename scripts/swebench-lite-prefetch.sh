@@ -74,29 +74,53 @@ retry_git() {
   done
 }
 
+has_commit() {
+  local repo_dir="$1"
+  local commit="$2"
+  git -C "${repo_dir}" rev-parse --verify "${commit}^{commit}" >/dev/null 2>&1
+}
+
 for row in "${REPO_ROWS[@]}"; do
   IFS=$'\t' read -r repo commits_str <<< "${row}"
   repo_key="${repo//\//__}"
   repo_dir="${REPOS_ROOT}/${repo_key}"
   repo_url="${REPO_SOURCE}/${repo_key}.git"
+  needs_fetch=0
 
   if [[ ! -d "${repo_dir}/.git" ]]; then
     echo "[prefetch] cloning ${repo_url}"
     retry_git git clone "${repo_url}" "${repo_dir}"
+    echo "[prefetch] clone completed ${repo_key}"
   else
     echo "[prefetch] using existing repo ${repo_dir}"
+    needs_fetch=1
   fi
 
-  echo "[prefetch] fetching ${repo_key}"
-  retry_git git -C "${repo_dir}" fetch --all --tags
-
   IFS=$'\t' read -r -a commit_list <<< "${commits_str}"
+  missing_count=0
   for commit in "${commit_list[@]}"; do
-    if git -C "${repo_dir}" rev-parse --verify "${commit}^{commit}" >/dev/null 2>&1; then
-      continue
+    if ! has_commit "${repo_dir}" "${commit}"; then
+      missing_count=$((missing_count + 1))
     fi
-    echo "[prefetch] missing commit after fetch: ${repo_key} ${commit}"
-    exit 1
+  done
+
+  if [[ ${missing_count} -gt 0 ]]; then
+    needs_fetch=1
+    echo "[prefetch] missing commits before fetch: ${repo_key} count=${missing_count}"
+  fi
+
+  if [[ ${needs_fetch} -eq 1 ]]; then
+    echo "[prefetch] fetching ${repo_key}"
+    retry_git git -C "${repo_dir}" fetch --all --tags
+  else
+    echo "[prefetch] skip fetch ${repo_key}; required commits already present"
+  fi
+
+  for commit in "${commit_list[@]}"; do
+    if ! has_commit "${repo_dir}" "${commit}"; then
+      echo "[prefetch] missing commit after fetch: ${repo_key} ${commit}"
+      exit 1
+    fi
   done
 
   echo "[prefetch] ready ${repo_key} commits=${#commit_list[@]}"
