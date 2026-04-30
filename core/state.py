@@ -23,6 +23,12 @@ class AgentState(TypedDict):
     """ReAct循环中Agent的状态"""
     # 会话历史消息
     messages: Annotated[list[BaseMessage], add_messages]
+    assistant_reasoning_fallbacks: list[dict]
+    session_memory_summary_path: str | None
+    session_memory_last_summarized_message_id: str | None
+    session_memory_tokens_at_last_extraction: int
+    session_memory_tool_calls_since_update: int
+    session_memory_last_update_turn: int
 
     # 当轮工具调用情况（仅 tool_routing / human_approval 使用）
     pending_tool_calls: list[ToolCallInfo]

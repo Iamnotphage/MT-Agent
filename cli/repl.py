@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import logging
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -17,6 +19,7 @@ from rich.text import Text
 
 from prompt_toolkit.history import InMemoryHistory
 
+from cli.commands.compact import cmd_compact
 from cli.commands.context import cmd_context
 from cli.commands.memory import cmd_memory
 from cli.commands.resume import cmd_resume
@@ -35,6 +38,8 @@ from cli.utils.text import (
 
 if TYPE_CHECKING:
     from core.agent import AgentRuntime
+
+logger = logging.getLogger(__name__)
 
 
 class Repl:
@@ -55,6 +60,7 @@ class Repl:
             console=console,
             event_bus=runtime.event_bus,
             session=runtime.session,
+            workspace=self._working_dir,
         )
 
     # ── 主循环 ───────────────────────────────────────────────────
@@ -145,7 +151,7 @@ class Repl:
         return requests
 
     def _prompt_approval(self, requests: list[dict]) -> dict[str, bool]:
-        self._stream.end_stream()
+        self._stream.pause_for_prompt()
 
         if not requests:
             return {}
@@ -210,10 +216,19 @@ class Repl:
             return
         self._closed = True
 
+        flush_start = time.time()
         filepath = self.runtime.session.flush()
+        flush_elapsed = time.time() - flush_start
+        if flush_elapsed > 1.0:
+            logger.warning("Session flush took %.3fs", flush_elapsed)
+
         checkpoint_manager = getattr(self.runtime, "checkpoint_manager", None)
         if checkpoint_manager is not None:
+            close_start = time.time()
             checkpoint_manager.__exit__(None, None, None)
+            close_elapsed = time.time() - close_start
+            if close_elapsed > 1.0:
+                logger.warning("Checkpoint manager close took %.3fs", close_elapsed)
             self.runtime.checkpoint_manager = None
         if filepath:
             self.console.print(f"\n  [dim]会话已保存 → {filepath}[/dim]")
@@ -295,6 +310,10 @@ class Repl:
                 cmd_context(self.console, self.runtime.context_manager, parts[1:])
             case "/memory":
                 cmd_memory(self.console, self.runtime.memory_manager, parts[1:])
+            case "/compact":
+                # 用 partition 保留多词指令原文
+                _, _, tail = cmd.partition(" ")
+                cmd_compact(self.console, self.runtime, tail.strip())
             case _:
                 self.console.print(f"  [red]未知命令:[/red] {cmd}")
                 self.console.print("  [dim]输入 /help 查看可用命令[/dim]")
@@ -310,6 +329,7 @@ class Repl:
             ("/clear", "清屏"),
             ("/new", "开启新会话 (清空对话历史)"),
             ("/resume", "浏览并恢复历史会话"),
+            ("/compact [instructions]", "手动压缩上下文；无参数优先 session memory，有参数直接 full compact"),
             ("/context show", "显示当前已加载的上下文"),
             ("/context reload", "重新加载上下文文件"),
             ("/memory list", "列出所有已保存的记忆"),
@@ -330,11 +350,12 @@ class Repl:
         stats = self.runtime.session.stats
         model = stats.model or "unknown"
         last = stats.last_input_tokens
+        effective_limit = stats.last_effective_context_limit or self._token_limit
 
-        if last <= 0:
+        if last <= 0 or effective_limit <= 0:
             remaining_pct = 100
         else:
-            remaining_pct = max(int((1 - last / self._token_limit) * 100), 0)
+            remaining_pct = max(int((1 - last / effective_limit) * 100), 0)
 
         # 获取工作目录完整路径，如果在 home 目录下则用 ~ 替换
         working_dir = str(self._working_dir)

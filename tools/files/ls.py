@@ -11,6 +11,7 @@ from langchain_core.tools.base import ToolException
 from pydantic import BaseModel, Field
 
 from tools.base import BaseTool, ToolRiskLevel
+from tools.workspace_paths import display_path, resolve_workspace_path
 
 _ALWAYS_IGNORE = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
@@ -51,10 +52,8 @@ class LsTool(BaseTool):
         dir_path: str = ".",
         ignore: list[str] | None = None,
     ) -> tuple[str, dict]:
-        resolved = (self.workspace / dir_path).resolve()
-
-        if not str(resolved).startswith(str(self.workspace)):
-            raise ToolException(f"Path out of bounds: {dir_path} is not within workspace")
+        resolved = resolve_workspace_path(self.workspace, dir_path)
+        display_dir = display_path(self.workspace, resolved)
 
         if not resolved.exists():
             raise ToolException(f"Directory does not exist: {dir_path}")
@@ -95,7 +94,7 @@ class LsTool(BaseTool):
         entries.sort(key=lambda e: (not e[1], e[0].lower()))
 
         if not entries:
-            msg = f"Directory {dir_path} is empty."
+            msg = f"Directory {display_dir} is empty."
             if ignored_count:
                 msg += f" ({ignored_count} ignored)"
             return msg, {"display": msg}
@@ -108,12 +107,12 @@ class LsTool(BaseTool):
                 lines.append(f"{name} ({_fmt_size(size)})")
 
         listing = "\n".join(lines)
-        header = f"Directory listing for {dir_path}:"
+        header = f"Directory listing for {display_dir}:"
         llm_output = f"{header}\n{listing}"
         if ignored_count:
             llm_output += f"\n\n({ignored_count} ignored)"
 
-        display = f"{dir_path} — {len(entries)} items"
+        display = f"{display_dir} — {len(entries)} items"
         if ignored_count:
             display += f" ({ignored_count} ignored)"
 

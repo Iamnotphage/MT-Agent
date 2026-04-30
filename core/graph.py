@@ -8,13 +8,15 @@ from core.event_bus import EventBus
 from core.state import AgentState
 from core.nodes.reasoning import create_reasoning_node, should_use_tools
 from core.nodes.tool_routing import create_tool_routing_node, needs_approval
-from core.nodes.human_approval import create_human_approval_node
+from core.nodes.human_approval import create_human_approval_node, post_approval_route
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from core.context import ContextManager
     from core.session import SessionStats
     from core.context.compressor import ContextCompressor
+    from core.context.session_memory import SessionMemoryManager
+    from core.context.session_memory_worker import SessionMemoryExtractWorker
     from tools.base import BaseTool
 
 
@@ -22,10 +24,13 @@ def build_agent_graph(
     llm: BaseChatModel,
     event_bus: EventBus,
     tools: list[BaseTool],
+    session=None,
     checkpointer=None,
     context_manager: ContextManager | None = None,
     session_stats: SessionStats | None = None,
     compressor: ContextCompressor | None = None,
+    session_memory_manager: SessionMemoryManager | None = None,
+    session_memory_worker: SessionMemoryExtractWorker | None = None,
 ) -> StateGraph:
     """
     工厂模式创建结点，构建 ReAct 循环的 LangGraph 状态图
@@ -41,7 +46,16 @@ def build_agent_graph(
     """
 
     # 工厂模式创建结点函数
-    reasoning_node = create_reasoning_node(llm, event_bus, tools, context_manager, session_stats, compressor)
+    reasoning_node = create_reasoning_node(
+        llm,
+        event_bus,
+        tools,
+        context_manager,
+        session_stats,
+        compressor,
+        session_memory_manager=session_memory_manager,
+        session_memory_worker=session_memory_worker,
+    )
     tool_routing_node = create_tool_routing_node(event_bus)
     human_approval_node = create_human_approval_node(event_bus)
 
@@ -50,7 +64,7 @@ def build_agent_graph(
     tool_node = ToolNode(
         tools,
         handle_tool_errors=True,
-        wrap_tool_call=create_event_bus_wrapper(event_bus),
+        wrap_tool_call=create_event_bus_wrapper(event_bus, session=session),
     )
 
     graph = StateGraph(AgentState)
@@ -84,8 +98,15 @@ def build_agent_graph(
         }
     )
 
-    # human_approval -> tools
-    graph.add_edge("human_approval", "tools")
+    # human_approval -> 条件路由
+    graph.add_conditional_edges(
+        "human_approval",
+        post_approval_route,
+        {
+            "tools": "tools",
+            "reasoning": "reasoning",
+        }
+    )
 
     # tools -> reasoning (ToolNode 直接输出 ToolMessage，不需要 observation)
     graph.add_edge("tools", "reasoning")

@@ -14,6 +14,8 @@ from typing import Any
 from config import load_llm_config
 from config.settings import CONTEXT as CONTEXT_CONFIG
 from core.context.compressor import ContextCompressor
+from core.context.session_memory import SessionMemoryManager
+from core.context.session_memory_worker import SessionMemoryExtractWorker
 from core.context import ContextManager
 from core.memory import MemoryManager
 from core.session import SessionRecorder
@@ -34,6 +36,9 @@ class AgentRuntime:
     context_manager: ContextManager
     memory_manager: MemoryManager
     session: SessionRecorder
+    compressor: ContextCompressor | None = None
+    session_memory_manager: SessionMemoryManager | None = None
+    session_memory_worker: SessionMemoryExtractWorker | None = None
     checkpoint_manager: AbstractContextManager[Any] | None = None
 
 
@@ -73,13 +78,33 @@ def create_agent_runtime(
         save_memory_fn=memory_manager.save_memory,
     )
 
+    # 为压缩器创建独立的 LLM 实例（不带 thinking mode）
+    compressor_llm = create_chat_model(
+        llm_cfg,
+        streaming=False,
+        temperature=0.0,
+    )
+
     # 上下文压缩器
     compressor = ContextCompressor(
-        llm=llm,
+        llm=compressor_llm,
         token_limit=CONTEXT_CONFIG.get("token_limit", 65536),
         threshold=CONTEXT_CONFIG.get("compression_threshold", 0.50),
         preserve_ratio=CONTEXT_CONFIG.get("compression_preserve_ratio", 0.30),
+        preserve_min_tokens=CONTEXT_CONFIG.get("compression_preserve_min_tokens", 10000),
+        preserve_max_tokens=CONTEXT_CONFIG.get("compression_preserve_max_tokens", 40000),
     )
+    session_memory_manager: SessionMemoryManager | None = None
+    session_memory_worker: SessionMemoryExtractWorker | None = None
+
+    if CONTEXT_CONFIG.get("enable_session_memory_compact", False):
+        session_memory_manager = SessionMemoryManager(
+            working_directory=ws,
+            config=CONTEXT_CONFIG,
+            session_id=session.stats.session_id,
+            llm=compressor_llm,
+        )
+        session_memory_worker = SessionMemoryExtractWorker(session_memory_manager, event_bus)
 
     checkpoint_path = session.get_checkpoint_path()
     checkpoint_manager = SqliteSaver.from_conn_string(str(checkpoint_path))
@@ -89,10 +114,13 @@ def create_agent_runtime(
         llm=llm,
         event_bus=event_bus,
         tools=tools,
+        session=session,
         checkpointer=checkpointer,
         context_manager=ctx_manager,
         session_stats=session.stats,
         compressor=compressor,
+        session_memory_manager=session_memory_manager,
+        session_memory_worker=session_memory_worker,
     )
 
     return AgentRuntime(
@@ -103,5 +131,8 @@ def create_agent_runtime(
         context_manager=ctx_manager,
         memory_manager=memory_manager,
         session=session,
+        compressor=compressor,
+        session_memory_manager=session_memory_manager,
+        session_memory_worker=session_memory_worker,
         checkpoint_manager=checkpoint_manager,
     )

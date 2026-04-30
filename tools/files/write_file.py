@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from core.utils.diff import generate_diff
 from tools.base import BaseTool, ToolRiskLevel
+from tools.workspace_paths import display_path, resolve_workspace_path
 
 
 class WriteFileArgs(BaseModel):
@@ -34,10 +35,8 @@ class WriteFileTool(BaseTool):
         super().__init__(workspace=Path(workspace or os.getcwd()).resolve(), **kwargs)
 
     def _run(self, *, file_path: str, content: str) -> tuple[str, dict]:
-        resolved = (self.workspace / file_path).resolve()
-
-        if not str(resolved).startswith(str(self.workspace)):
-            raise ToolException(f"Path out of bounds: {file_path} is not within workspace")
+        resolved = resolve_workspace_path(self.workspace, file_path)
+        display = display_path(self.workspace, resolved)
 
         if resolved.exists() and resolved.is_dir():
             raise ToolException(f"Target is a directory, not a file: {file_path}")
@@ -59,11 +58,11 @@ class WriteFileTool(BaseTool):
         except OSError as e:
             raise ToolException(f"Write failed: {e}")
 
-        diff = generate_diff(file_path, original, content, is_new=is_new)
+        diff = generate_diff(display, original, content, is_new=is_new)
 
         action = "Created" if is_new else "Overwrote"
         total_lines = len(content.splitlines())
-        llm_output = f"{action} file: {file_path} ({total_lines} lines, {diff.stat})"
+        llm_output = f"{action} file: {display} ({total_lines} lines, {diff.stat})"
         if diff.unified_diff:
             preview = diff.unified_diff[:2000]
             if len(diff.unified_diff) > 2000:
@@ -73,7 +72,7 @@ class WriteFileTool(BaseTool):
         return (
             llm_output,
             {
-                "display": f"{file_path} ({diff.stat})",
+                "display": f"{display} ({diff.stat})",
                 "is_new": is_new,
                 "lines": total_lines,
                 "diff": diff,

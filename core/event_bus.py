@@ -31,6 +31,13 @@ class EventType(Enum):
     SESSION_END = "session_end"
     ERROR = "error"
     CONTEXT_COMPRESSED = "context_compressed"
+    AUTO_COMPACT_CHECKED = "auto_compact_checked"
+    AUTO_COMPACT_FAILED = "auto_compact_failed"
+    AUTO_COMPACT_DISABLED = "auto_compact_disabled"
+    TOOL_RESULT_PERSISTED = "tool_result_persisted"
+    MICRO_COMPACTED = "micro_compacted"
+    SESSION_MEMORY_UPDATED = "session_memory_updated"
+    COMPACT_BOUNDARY = "compact_boundary"
     TRANSCRIPT_MESSAGE = "transcript_message"
 
 

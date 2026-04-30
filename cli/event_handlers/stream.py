@@ -13,12 +13,15 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
 from cli.utils.text import TOOL_DISPLAY, truncate
 from core.event_bus import AgentEvent, EventBus, EventType
+from core.session.schema import make_session_memory_update_record
+from tools.workspace_paths import display_path
 
 if TYPE_CHECKING:
     from core.session import SessionRecorder
@@ -42,12 +45,14 @@ class StreamHandler:
     # Spinner 动画帧（类似 Claude Code）
     SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-    def __init__(self, console: Console, event_bus: EventBus, session: SessionRecorder) -> None:
+    def __init__(self, console: Console, event_bus: EventBus, session: SessionRecorder, *, workspace: str | Path | None = None) -> None:
         self._console = console
         self._session = session
+        self._workspace = Path(workspace) if workspace else None
 
         # LLM 流式输出状态
         self._streaming = False
+        self._thought_streaming = False
         self._content_buf: list[str] = []
         self._thought_buf: list[str] = []
 
@@ -69,11 +74,14 @@ class StreamHandler:
         event_bus.subscribe(EventType.TOOL_CALL_REQUEST, self.on_tool_request)
         event_bus.subscribe(EventType.TOOL_CALL_COMPLETE, self.on_tool_complete)
         event_bus.subscribe(EventType.TOOL_LIVE_OUTPUT, self.on_tool_live_output)
+        event_bus.subscribe(EventType.TOOL_RESULT_PERSISTED, self.on_tool_result_persisted)
         event_bus.subscribe(EventType.CONTEXT_COMPRESSED, self.on_context_compressed)
+        event_bus.subscribe(EventType.COMPACT_BOUNDARY, self.on_compact_boundary)
         event_bus.subscribe(EventType.APPROVAL_REQUEST, self.on_approval_request)
         event_bus.subscribe(EventType.APPROVAL_RESPONSE, self.on_approval_response)
         event_bus.subscribe(EventType.ERROR, self.on_error)
         event_bus.subscribe(EventType.TRANSCRIPT_MESSAGE, self.on_transcript_message)
+        event_bus.subscribe(EventType.SESSION_MEMORY_UPDATED, self.on_session_memory_updated)
 
     # ── 流式控制 ─────────────────────────────────────────────────
 
@@ -149,8 +157,10 @@ class StreamHandler:
         if self._streaming:
             self._console.print()
             self._streaming = False
+        if self._thought_streaming:
+            self._console.print()
+            self._thought_streaming = False
         if self._thought_buf:
-            self._session.record({"type": "thought", "text": "".join(self._thought_buf)})
             self._thought_buf.clear()
         if self._content_buf:
             self._content_buf.clear()
@@ -159,6 +169,10 @@ class StreamHandler:
         """结束所有流式输出 (含工具缓冲 flush)"""
         self._end_content_stream()
         self._flush_tool_buffer()
+
+    def pause_for_prompt(self) -> None:
+        """Stop active content/thought streaming without flushing buffered tool state."""
+        self._end_content_stream()
 
     # ── LLM 内容输出: ⏺ 白色 + 缩进 ────────────────────────────
 
@@ -180,11 +194,20 @@ class StreamHandler:
         text = event.data.get("text", "")
         if not text:
             return
-        # 结束内容流，但不 flush 工具缓冲
-        self._end_content_stream()
-        # 渲染思考内容（灰色斜体）
-        self._console.print()
-        self._console.print(f"  [dim italic]💭 {text}[/dim italic]", highlight=False)
+
+        self._stop_thinking_animation()
+        if self._streaming:
+            self._console.print()
+            self._streaming = False
+
+        if not self._thought_streaming:
+            self._flush_tool_buffer()
+            self._console.print()
+            self._console.print("  💭 ", end="", style="dim italic")
+            self._thought_streaming = True
+
+        rendered = text.replace("\n", "\n    ")
+        self._console.print(rendered, end="", style="dim italic", highlight=False, markup=False)
         self._thought_buf.append(text)
 
     # ── 工具事件: 缓冲 → 批量渲染 ──────────────────────────────
@@ -256,6 +279,9 @@ class StreamHandler:
         if flush_now:
             self._flush_tool_buffer()
 
+    def on_tool_result_persisted(self, event: AgentEvent) -> None:
+        return
+
     # ── 渲染工具缓冲 ─────────────────────────────────────────────
 
     def _flush_tool_buffer(self) -> None:
@@ -271,6 +297,8 @@ class StreamHandler:
     def _render_tool_block(self, rec: _ToolRecord) -> None:
         name = TOOL_DISPLAY.get(rec.tool_name, rec.tool_name)
         file_path = rec.arguments.get("file_path")
+        if file_path and self._workspace:
+            file_path = display_path(self._workspace, Path(file_path))
 
         if rec.status == "error":
             dot_style = "bold red"
@@ -339,17 +367,27 @@ class StreamHandler:
         self.end_stream()
         removed = event.data.get("removed_count", 0)
         kept = event.data.get("kept_count", 0)
-        summary = event.data.get("summary", "")
-        self._session.record({
-            "type": "compression",
-            "summary": summary,
-            "removed_count": removed,
-            "kept_count": kept,
-        })
         self._console.print(
             f"\n  [bold yellow]⚡ 上下文已压缩[/bold yellow] "
             f"[dim]({removed} 条消息摘要化, 保留 {kept} 条)[/dim]"
         )
+
+    def on_compact_boundary(self, event: AgentEvent) -> None:
+        self._session.record({
+            "type": "compact_boundary",
+            "reason": event.data.get("reason", "auto"),
+            "pre_tokens": event.data.get("pre_tokens", 0),
+            "post_tokens": event.data.get("post_tokens", 0),
+        })
+
+    def on_session_memory_updated(self, event: AgentEvent) -> None:
+        self._session.record(make_session_memory_update_record(
+            summary_path=event.data.get("summary_path", ""),
+            last_summarized_message_id=event.data.get("last_summarized_message_id"),
+            tokens_at_last_extraction=event.data.get("tokens_at_last_extraction", 0),
+            tool_calls_since_last_update=event.data.get("tool_calls_since_last_update", 0),
+            turn=event.data.get("turn", 0),
+        ))
 
     def on_error(self, event: AgentEvent) -> None:
         self.end_stream()

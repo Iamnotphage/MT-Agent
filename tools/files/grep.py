@@ -11,6 +11,7 @@ from langchain_core.tools.base import ToolException
 from pydantic import BaseModel, Field
 
 from tools.base import BaseTool, ToolRiskLevel
+from tools.workspace_paths import display_path, resolve_workspace_path
 
 _ALWAYS_IGNORE = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
@@ -59,11 +60,8 @@ class GrepTool(BaseTool):
         except re.error as e:
             raise ToolException(f"Invalid regex pattern: {e}")
 
-        search_dir = self.workspace / (path or ".")
-        resolved = search_dir.resolve()
-
-        if not str(resolved).startswith(str(self.workspace)):
-            raise ToolException(f"Path out of bounds: {path} is not within workspace")
+        resolved = resolve_workspace_path(self.workspace, path or ".")
+        display_root = display_path(self.workspace, resolved)
 
         if not resolved.exists():
             raise ToolException(f"Directory does not exist: {path}")
@@ -101,7 +99,7 @@ class GrepTool(BaseTool):
         if not matches:
             msg = f'Found 0 matches for pattern "{pattern}"'
             if path:
-                msg += f' in "{path}"'
+                msg += f' in "{display_root}"'
             if include:
                 msg += f' (filter: "{include}")'
             return msg, {"display": msg}
@@ -119,7 +117,7 @@ class GrepTool(BaseTool):
         listing = "\n".join(lines)
         llm_output = f'Found {len(matches)} match(es) for pattern "{pattern}"'
         if path:
-            llm_output += f' in "{path}"'
+            llm_output += f' in "{display_root}"'
         if include:
             llm_output += f' (filter: "{include}")'
         llm_output += f":\n---\n{listing}"
