@@ -24,6 +24,11 @@ TIMEOUT=1800
 # ---------------------------------------------------------------------------
 # Command assembly
 # ---------------------------------------------------------------------------
+if [[ ! -s "${PREDICTIONS_PATH}" ]]; then
+  echo "[eval] predictions file missing or empty: ${PREDICTIONS_PATH}" >&2
+  exit 1
+fi
+
 cd "${SWEBENCH_PATH}"
 
 CMD=(

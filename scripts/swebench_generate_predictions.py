@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 from pathlib import Path
 
@@ -52,6 +53,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--instance_ids", nargs="+", help="Specific SWE-bench instance IDs")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of instances")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--error_output",
+        default=None,
+        help="JSONL path for failed instances. Defaults to <output>.errors.jsonl",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from an existing predictions JSONL and skip completed instances.",
+    )
+    parser.add_argument(
+        "--continue_on_error",
+        action="store_true",
+        help="Keep running after an instance failure and record the error to error_output.",
+    )
     parser.add_argument("--repos_root", default=DEFAULT_REPOS_ROOT)
     parser.add_argument(
         "--offline_repos",
@@ -274,31 +290,104 @@ def write_predictions(instances: list[dict], predictions: list[dict], output_pat
     log(f"[output] instances={ [instance['instance_id'] for instance in instances] }")
 
 
+def load_existing_predictions(output_path: Path) -> list[dict]:
+    if not output_path.exists():
+        return []
+
+    predictions: list[dict] = []
+    with output_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            predictions.append(json.loads(line))
+    return predictions
+
+
+def append_prediction(output_path: Path, prediction: dict) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(prediction, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def append_error(error_path: Path, error_record: dict) -> None:
+    error_path.parent.mkdir(parents=True, exist_ok=True)
+    with error_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(error_record, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def main() -> int:
     args = parse_args()
     instances = load_instances(args.dataset_name, args.split, args.instance_ids, args.limit)
     repos_root = Path(args.repos_root).resolve()
     output_path = Path(args.output).resolve()
+    error_output = Path(args.error_output).resolve() if args.error_output else output_path.with_suffix(output_path.suffix + ".errors.jsonl")
 
     predictions: list[dict] = []
+    completed_ids: set[str] = set()
 
-    for idx, instance in enumerate(instances, start=1):
+    if args.resume:
+        predictions = load_existing_predictions(output_path)
+        completed_ids = {
+            str(pred.get("instance_id"))
+            for pred in predictions
+            if pred.get("instance_id")
+        }
+        if completed_ids:
+            log(f"[resume] loaded {len(completed_ids)} completed instances from {output_path}")
+
+    remaining_instances = [
+        instance for instance in instances
+        if instance["instance_id"] not in completed_ids
+    ]
+
+    if args.resume and output_path.exists():
+        log(f"[resume] remaining instances: {len(remaining_instances)} / {len(instances)}")
+    else:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.exists():
+            output_path.unlink()
+        if error_output.exists():
+            error_output.unlink()
+
+    for idx, instance in enumerate(remaining_instances, start=1):
         instance_id = instance["instance_id"]
-        log(f"[run] [{idx}/{len(instances)}] instance={instance_id}")
-        repo_dir = ensure_repo(instance, repos_root, args.repo_source, args.offline_repos)
-        prompt = build_prompt(instance)
-        final_text, patch = run_agent_on_instance(repo_dir, prompt)
+        log(f"[run] [{idx}/{len(remaining_instances)}] instance={instance_id}")
+        try:
+            repo_dir = ensure_repo(instance, repos_root, args.repo_source, args.offline_repos)
+            prompt = build_prompt(instance)
+            final_text, patch = run_agent_on_instance(repo_dir, prompt)
 
-        if not patch.strip():
-            print(f"Warning: empty patch for {instance_id}", file=sys.stderr, flush=True)
+            if not patch.strip():
+                print(f"Warning: empty patch for {instance_id}", file=sys.stderr, flush=True)
 
-        predictions.append({
-            "instance_id": instance_id,
-            "model_name_or_path": args.model_name_or_path,
-            "model_patch": patch,
-        })
+            prediction = {
+                "instance_id": instance_id,
+                "model_name_or_path": args.model_name_or_path,
+                "model_patch": patch,
+            }
+            predictions.append(prediction)
+            append_prediction(output_path, prediction)
+            log(f"[output] appended instance={instance_id}")
+        except Exception as exc:
+            error_record = {
+                "instance_id": instance_id,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "traceback": traceback.format_exc(),
+                "timestamp": int(time.time()),
+            }
+            append_error(error_output, error_record)
+            log(f"[error] recorded failure for instance={instance_id} -> {error_output}")
+            if not args.continue_on_error:
+                log("[error] stopping run; resume later after fixing the issue")
+                raise
 
-    write_predictions(instances, predictions, output_path)
+    log(f"[output] completed {len(predictions)} predictions total")
     return 0
 
 
