@@ -127,7 +127,7 @@ def run_git(cmd: list[str], cwd: Path) -> str:
         text=True,
         capture_output=True,
     )
-    return result.stdout.strip()
+    return result.stdout
 
 
 def has_commit(repo_dir: Path, commit: str) -> bool:
