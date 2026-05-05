@@ -7,7 +7,7 @@ This script handles the inference stage before `swebench.harness.run_evaluation`
 4. Export the resulting git diff as `model_patch`
 
 Example:
-    uv run python scripts/swebench_generate_predictions.py \
+    uv run python benchmark/SWE-Bench-Lite/generate_predictions.py \
         --dataset_name princeton-nlp/SWE-bench_Lite \
         --instance_ids sympy__sympy-20590 \
         --output predictions/mt-agent-lite.jsonl
@@ -25,7 +25,7 @@ import traceback
 import uuid
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 

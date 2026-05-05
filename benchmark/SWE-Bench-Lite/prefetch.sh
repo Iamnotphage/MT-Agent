@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+BENCHMARK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${BENCHMARK_DIR}/../.." && pwd)"
+
 # ---------------------------------------------------------------------------
 # User-editable paths
 # ---------------------------------------------------------------------------
-AGENT_PROJECT_PATH="${HOME}/projects/MT-Agent"
+AGENT_PROJECT_PATH="${PROJECT_ROOT}"
 
 # ---------------------------------------------------------------------------
 # User-editable prefetch settings

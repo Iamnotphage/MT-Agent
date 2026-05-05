@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+BENCHMARK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${BENCHMARK_DIR}/../.." && pwd)"
+
 # ---------------------------------------------------------------------------
 # User-editable paths
 # ---------------------------------------------------------------------------
-AGENT_PROJECT_PATH="${HOME}/projects/MT-Agent"
+AGENT_PROJECT_PATH="${PROJECT_ROOT}"
 
 # ---------------------------------------------------------------------------
 # User-editable run settings
@@ -17,8 +20,8 @@ INSTANCE_IDS=()
 MODEL_NAME_OR_PATH="mt-agent-lite"
 REPOS_ROOT=".swebench/repos"
 REPO_SOURCE="https://github.com/swe-bench-repos"
-OUTPUT_PATH="predictions/mt-agent-lite.jsonl"
-ERROR_OUTPUT="predictions/mt-agent-lite.errors.jsonl"
+OUTPUT_PATH="benchmark/SWE-Bench-Lite/predictions/mt-agent-lite.jsonl"
+ERROR_OUTPUT="benchmark/SWE-Bench-Lite/predictions/mt-agent-lite.errors.jsonl"
 OFFLINE_REPOS=1
 RESUME=1
 CONTINUE_ON_ERROR=0
@@ -32,7 +35,7 @@ CMD=(
   uv
   run
   python
-  scripts/swebench_generate_predictions.py
+  benchmark/SWE-Bench-Lite/generate_predictions.py
   --dataset_name "${DATASET_NAME}"
   --split "${SPLIT}"
   --output "${OUTPUT_PATH}"
